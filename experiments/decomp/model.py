@@ -128,6 +128,16 @@ class FFNModel(PreTrainedModel):
         return cls(_Config(*args, **kwargs))
 
     @classmethod
+    def from_config_obj(cls, config: _Config):
+        #return cls(
+        #    lr=config.lr,
+        #    wd=config.wd,
+        #    epochs=config.epochs,
+        #)
+        kwargs = {attr: getattr(config, attr) for attr in vars(config) if hasattr(config, attr)}
+        return cls(**kwargs)
+    
+    @classmethod
     def from_pretrained(cls, path, *args, **kwargs):
         new = cls(_Config(*args, **kwargs))
         new.load_state_dict(torch.load(path))
