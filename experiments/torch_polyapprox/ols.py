@@ -3,7 +3,8 @@ from functools import partial
 from typing import Literal
 
 from numpy.typing import ArrayLike, NDArray
-import numpy as np
+#import numpy as np
+import torch
 
 from .extra import sigmoid, sigmoid_prime, swish, swish_prime
 from .gelu import gelu_ev, gelu_prime_ev, gelu_poly_ev
@@ -27,54 +28,21 @@ class OlsResult:
     
     Currently only implemented for ReLU activations.
     """
-    def gamma_to_B(self):
-        gamma_entries = self.gamma.shape[-1]
-        #print(gamma_entries)
-        row_dim = int(np.floor(np.sqrt(2*gamma_entries)))
-        full_mat = np.zeros((row_dim, row_dim, self.gamma.shape[0]))
-        tril_indices = np.tril_indices(row_dim)
-        
-        full_mat[tril_indices] = self.gamma.T
-        full_mat = 0.5 * (full_mat + full_mat.transpose(1, 0, 2))
-        return full_mat
 
-    def test_inner(self, x, gamma_mat):
-        # full_mat shape: in1, in2 h:
-        if x.ndim == 1:
-            x = np.expand_dims(x, axis=0)
-        
-        full_mat = self.gamma_to_B(gamma_mat)
-        print(full_mat.shape, x.shape)
-        prod = np.einsum('ijh,bi,bj ->bh', full_mat, x, x)
-        #print(full_mat.shape, x.shape)
-        return prod
-
-    #def __call__(self, x: NDArray) -> NDArray:
-    #    """Evaluate the linear model at the given inputs."""
-    #    y = x @ self.beta + self.alpha
-
-    #    if self.gamma is not None:
-    #        #full_mat = self.gamma_to_B()
-    #        outer = np.einsum('ij,ik->ijk', x, x)
-
-    #        rows, cols = np.tril_indices(x.shape[1])
-    #        print(outer[:, rows, cols].shape, self.gamma.shape)
-    #        y += outer[:, rows, cols] @ self.gamma.T
-    #    return y
-    
-    def __call__(self, x: NDArray) -> NDArray:
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """Evaluate the linear model at the given inputs."""
         y = x @ self.beta + self.alpha
 
         if self.gamma is not None:
-            print('ols.quad() called,  pre_mat')
-            full_mat = self.gamma_to_B()
-            print(f'ols.quad() called, post_mat. matshape {full_mat.shape}, xshape {x.shape}')
-            #print(f'ols.quad after adding, matshape {full_mat.shape}, xshape {x.shape}, yshape {y.shape}')
-            y += np.einsum('ijh,bi,bj ->bh', full_mat, x, x)
-            print(f'ols.quad after adding, matshape {full_mat.shape}, xshape {x.shape}, yshape {y.shape}')
+            outer = torch.einsum('ij,ik->ijk', x, x)
+
+            rows, cols = torch.tril_indices(x.shape[1], x.shape[1])
+            print(outer[:, rows, cols].shape, self.gamma.shape)
+            y += outer[:, rows, cols] @ self.gamma.T
 
         return y
+    
+
 
 # Mapping from activation functions to EVs
 ACT_TO_EVS = {
@@ -82,7 +50,7 @@ ACT_TO_EVS = {
     'relu': relu_ev,
     'sigmoid': partial(gauss_hermite, sigmoid),
     'swish': partial(gauss_hermite, swish),
-    'tanh': partial(gauss_hermite, np.tanh),
+    'tanh': partial(gauss_hermite, torch.tanh),
 }
 # Mapping from activation functions to EVs of their derivatives
 ACT_TO_PRIME_EVS = {
@@ -90,7 +58,7 @@ ACT_TO_PRIME_EVS = {
     'relu': relu_prime_ev,
     'sigmoid': partial(gauss_hermite, sigmoid_prime),
     'swish': partial(gauss_hermite, swish_prime),
-    'tanh': partial(gauss_hermite, lambda x: 1 - np.tanh(x)**2),
+    'tanh': partial(gauss_hermite, lambda x: 1 - torch.tanh(x)**2),
 }
 ACT_TO_POLY_EVS = {
     'gelu': gelu_poly_ev,
@@ -131,34 +99,49 @@ def ols(
             print(*args)
     
     d_input = W1.shape[1]
-
+    if mean is not None:
+        mean = mean.squeeze()
+    
+    device = W1.device
     # Preactivations are Gaussian; compute their mean and standard deviation
+    # For MNIST, add actual instance values in comments
     debug_print(f'0. First handle linear case.')
     debug_print(f'According to Nora, linear and quad should be split into separate cases, so only trust up to 4.')
     if cov is not None:
         debug_print(f'1. Cov provided, relevant shapes: W1 {W1.shape}, cov {cov.shape}, W1^T {W1.T.shape}')
-        #print(W1.shape, cov.shape, W1.T.shape)
+        #MNIST: W1 [256,  784], cov [ 784,  784], W1.T [ 784, 256]
+        #CIFAR: W1 [256, 3072], cov [3072, 3072], W1.T [3072, 256]
         preact_cov = W1 @ cov @ W1.T
         cross_cov = cov @ W1.T
         debug_print(f'Computing preact_cov = W1 @ cov @ W1.T, shape f{preact_cov.shape}')
         debug_print(f'Computing cross_cov = cov @ W1.T, shape f{cross_cov.shape}')
+        #MNIST: preact_cov [ 256, 256], cross_cov [ 784,  256]
+        #CIFAR: preact_cov [ 256, 256], cross_cov [3072,  256]
     else:
         debug_print(f'1. No cov provided, assuming identity. relevant shapes: W1 {W1.shape}, W1^T {W1.T.shape}')
         preact_cov = W1 @ W1.T
         cross_cov = W1.T
         debug_print(f'Computing preact_cov = W1 @ Id @ W1.T, shape f{preact_cov.shape}')
         debug_print(f'Computing cross_cov = Id @ W1.T, shape f{cross_cov.shape}')
+        #MNIST: preact_cov [ 256, 256], cross_cov [ 784,  256]
+        #CIFAR: preact_cov [ 256, 256], cross_cov [3072,  256]
 
-    preact_mean = b1.copy()
-    preact_var = np.diag(preact_cov)
-    preact_std = np.sqrt(preact_var)
+    preact_mean = b1.clone().to(device)
+    preact_var = torch.diag(preact_cov).to(device)
+    preact_std = torch.sqrt(preact_var).to(device)
     debug_print(f'2. Preactivation mean (from b1): {preact_mean.shape}, variance: {preact_var.shape}, std: {preact_std.shape}')
+    #MNIST: preact_mean [256], preact_var [256], preact_std [256]
+    #CIFAR: preact_mean [256], preact_var [256], preact_std [256]
     
     if mean is not None:
+        
+        #preact_mean += W1 @ mean # OG. Apparently migrating to torch means need mean.T?
         debug_print(f'2. Mean not none, updated preact_mean += W1 @ mean')
-        debug_print(f'W1 {W1.shape}, mean {mean.shape}')
-        preact_mean += W1 @ mean
-        debug_print(f'Preact mean shape: {preact_mean.shape}')
+        debug_print(f'W1 {W1.shape}, mean {mean.shape}, preact_mean {preact_mean.shape}')
+        preact_mean += W1 @ mean.squeeze()
+        debug_print(f'2. Mean not none, updated preact_mean += W1 @ mean')
+        #MNIST: W1 [256,  784], mean [ 784], preact_mean [256]
+        #CIFAR: W1 [256, 3072], mean [3072], preact_mean [256]
 
     try:
         act_ev = ACT_TO_EVS[act]
@@ -172,8 +155,13 @@ def ols(
     debug_print('3. Applying Stein\'s lemma to compute the cross-covariance of the input. Uses preact mean & std. Stores in output_cross_cov')
     debug_print('Stein\'s lemma says that E[g(X)X^n] can be computed as a linear combination of E[g^(k)(X)] terms, kth derivatives')
     debug_print('Important to remember!! n is rarely larger than 2, IMO Nora overly generalized this. We will nonetheless roll with it.')
-    act_prime_mean = act_prime_ev(preact_mean, preact_std)
+    # error rn, preact_std is numpy instead of torch. Check this.
+    debug_print(f'preact_std {preact_std.shape}')
+    # MNIST & CIFAR: preact_std [256]
+    act_prime_mean = act_prime_ev(preact_mean, preact_std) # ideally same device.
     output_cross_cov = (cross_cov * act_prime_mean) @ W2.T
+    debug_print(f'out_cross_cov = (cross_cov * act_prime_mean) @ W2.T')
+    debug_print(f'cross_cov {cross_cov.shape},  {act_prime_mean.shape},  W2.T {W2.T.shape}')
     debug_print(f'Output cross covariance shape before bias: {output_cross_cov.shape}')
     # Compute expectation of act_fn(x) for each preactivation
     act_mean = act_ev(preact_mean, preact_std)
@@ -185,7 +173,8 @@ def ols(
         debug_print(f'Cov provided. Computes beta = np.linalg.solve(cov, output_cross_cov) ~ linear algebra')
         debug_print(f'Equivalent to computing beta = Cov(x)^-1 Cov(x, f(x)). Only possible if Cov(x) invertible')
         debug_print(f'cov: {cov.shape}, output_cross_cov: {output_cross_cov.shape}')
-        beta = np.linalg.solve(cov, output_cross_cov)
+        # need to fix: Cov is currently singular. cov is [784, 784]. Right. Need to take a tril.
+        beta = torch.linalg.solve(cov, output_cross_cov) # prev np
         debug_print(f'beta: {beta.shape}')
     else:
         debug_print(f'No cov provided, identity assumed. Then beta = output_cross_cov')
@@ -203,36 +192,55 @@ def ols(
     if order == 'quadratic':
         assert cov == None and mean == None, ValueError('Only N(0,1) known to work!!')
         debug_print(f'5.1 check')
-        cov = cov_x = cov if cov is not None else np.eye(d_input)
-        mu = mean if mean is not None else np.zeros(d_input)
-        rows, cols = np.tril_indices(d_input)
+        # Need to validate, update code s.t. all tensors on same device. All torch tensor inits default to 'cpu'. 
+        cov = cov_x = cov if cov is not None else torch.eye(d_input).to(device) # prev np
+        mu = mean if mean is not None else torch.zeros(d_input).to(device) # prev np
+        rows, cols = torch.tril_indices(d_input, d_input).to(device)
 
         cov_y = W1 @ cov @ W1.T
         xcov = cov_x @ W1.T
 
         #cov_x = cov
         mean_y = mu @ W1.T + b1
-        var_x = np.diag(cov_x)
+        var_x = torch.diag(cov_x).to(device) # prev np
         debug_print(f'5.2 check')
 
-        Cov_x = np.array([
-            [var_x[rows], cov_x[rows, cols]],
-            [cov_x[cols, rows], var_x[cols]],
-        ]).T
+        #Cov_x = torch.array([ # prev np. Need torch.Tensor rather than np.array. To fix.
+        #    [var_x[rows], cov_x[rows, cols]],
+        #    [cov_x[cols, rows], var_x[cols]],
+        #]).T
+        
+        debug_print(f'Attempting to produce matrix Cov_x: \n',
+                    f'[var_x[rows] {var_x[rows].shape}, cov_x[rows, cols] {cov_x[rows, cols].shape}],\n',
+                    f'[cov_x[cols, rows] {cov_x[cols, rows].shape}, var_x[cols] {var_x[cols].shape}],].T')
+        Cov_x = torch.Tensor([ # prev np. Need torch.Tensor rather than np.array. To fix.
+            [var_x[rows].cpu().numpy(), cov_x[rows, cols].cpu().numpy()],
+            [cov_x[cols, rows].cpu().numpy(), var_x[cols].cpu().numpy()],
+        ]).to(device).T
+        debug_print(f'Cov_x {Cov_x.shape}, device {Cov_x.device}')
+        # iiinteresting. swapping to .numpy() works, obviously this is not desirable as we want things
+        # completely on-device, which wont work if using device='cuda:0'.
 
-        Xcov = np.stack([
+        debug_print(f'Creating cross covariance matrix. xcov {xcov.shape}, xcov[rows] {xcov[rows].shape}, xcov[cols] {xcov[cols].shape}')
+        Xcov = torch.stack([ # prev np
             xcov[rows],
             xcov[cols],
         ]).T
 
-        Mean_x = np.array([mu[rows], mu[cols]]).T
-        Var_y = np.diag(cov_y)
+        #Mean_x = np.array([mu[rows], mu[cols]]).T # prev np
+        #Var_y = np.diag(cov_y) # prev np
+        debug_print(f'Attempting to produce matrix Mean_x: \n',
+                    f'Mean_x = [mu[rows] {mu[rows].shape}, mu[cols] {mu[cols].shape}].T')
+        #Mean_x = torch.Tensor([mu[rows], mu[cols]]).T # prev np
+        Mean_x = torch.Tensor([mu[rows].cpu().numpy(), mu[cols].cpu().numpy()]).to(device).T # prev np
+        Var_y = torch.diag(cov_y).to(device) # prev np
 
         
         debug_print(f'5.3 check')
-        debug_print(f'Attempting master_theorem. Takes args:\n',
-        f'Mean_x {Mean_x.shape}, Cov_x {Cov_x.shape}, mean_y[..., None] {mean_y[..., None].shape},\n'
-        f'Var_y[..., None] {Var_y[..., None].shape}, XCov {Xcov.shape}')
+        # on GPU, goes OOM
+        debug_print(f'Attempting master_theorem. On device {device}. Takes args:\n',
+        f'Mean_x {Mean_x.shape}, Cov_x {Cov_x.shape}, mean_y[..., None] {mean_y[..., None].shape}, XCov {Xcov.shape}')
+        
         coefs = master_theorem(
             Mean_x, Cov_x, mean_y[..., None], Var_y[..., None], Xcov
         )
@@ -254,14 +262,15 @@ def ols(
         )
         
         debug_print(f'5.5 check')
-        quad_xcov = W2 @ (E_gy_x1x2 - np.outer(const, (rows == cols)))
+        #quad_xcov = W2 @ (E_gy_x1x2 - np.outer(const, (rows == cols))) # prev np
+        quad_xcov = W2 @ (E_gy_x1x2 - torch.outer(const, (rows == cols))) # prev np
         
         # 
         gamma = quad_xcov / (1 + (rows == cols)) #wtf?
         
-        debug_print(f'5.6 check')
+        debug_print(f'5.6 check, rows {type(rows)}')
         # adjust constant term
-        alpha -= (rows == cols) @ gamma.T
+        alpha -= (rows == cols).float() @ gamma.T
     else:
         gamma = None
 
@@ -270,7 +279,8 @@ def ols(
     if act == 'relu' and return_fvu:
         # TODO: Figure out what is wrong with our implementation for non-zero means
         assert mean is None, "FVU computation is not implemented for non-zero means"
-        rhos = preact_cov / np.outer(preact_std, preact_std)
+        #rhos = preact_cov / np.outer(preact_std, preact_std) # prev np
+        rhos = preact_cov / torch.outer(preact_std, preact_std) # prev np
 
         # Compute the raw second moment matrix of the activations
         act_m2 = bivariate_product_moment(
@@ -283,15 +293,18 @@ def ols(
         )
 
         # E[MLP(x)^T MLP(x)]
-        mlp_scale = np.trace(W2 @ act_m2 @ W2.T) + 2 * act_mean.T @ W2.T @ b2 + b2 @ b2
+        #mlp_scale = np.trace(W2 @ act_m2 @ W2.T) + 2 * act_mean.T @ W2.T @ b2 + b2 @ b2
+        mlp_scale = torch.trace(W2 @ act_m2 @ W2.T) + 2 * act_mean.T @ W2.T @ b2 + b2 @ b2 # prev np
 
         # E[g(x)^T MLP(x)] where g(x) is the linear predictor
-        x_moment = cross_cov + (np.outer(mean, output_mean) if mean is not None else 0)
-        inner_prod = np.trace(beta.T @ x_moment) + alpha.T @ output_mean
+        x_moment = cross_cov + (torch.outer(mean, output_mean) if mean is not None else 0) # prev np
+        #inner_prod = np.trace(beta.T @ x_moment) + alpha.T @ output_mean # prev np
+        inner_prod = torch.trace(beta.T @ x_moment) + alpha.T @ output_mean # prev np
 
         # E[g(x)^T g(x)] where g(x) is the linear predictor
         inner = 2 * mean.T @ beta @ alpha if mean is not None else 0
-        lin_scale = np.trace(beta.T @ cov @ beta) + inner + alpha.T @ alpha
+        #lin_scale = np.trace(beta.T @ cov @ beta) + inner + alpha.T @ alpha # prev np
+        lin_scale = torch.trace(beta.T @ cov @ beta) + inner + alpha.T @ alpha # prev np
 
         # Fraction of variance unexplained
         denom = mlp_scale - output_mean @ output_mean
@@ -323,18 +336,22 @@ def glu_mean(
         # Cross-covariance matrix of y and z
         cross_cov = W @ cov @ V.T
 
-        y_std = np.diag(W @ cov @ W.T) ** 0.5
+        #y_std = np.diag(W @ cov @ W.T) ** 0.5 # prev np
+        y_std = torch.diag(W @ cov @ W.T) ** 0.5 # prev np
         # z_std = np.diag(V @ cov @ V.T) ** 0.5
     else:
         cross_cov = W @ V.T
-        y_std = np.linalg.norm(W, axis=1)
+        #y_std = np.linalg.norm(W, axis=1) # prev np
+        y_std = torch.linalg.norm(W, axis=1) # prev np
         # z_std = np.linalg.norm(V, axis=1)
 
-    y_mean = np.array(b1)
+    #y_mean = np.array(b1) # prev np
+    z_mean = torch.Tensor(b2) # prev np.array
     if mean is not None:
         y_mean += W @ mean
 
-    z_mean = np.array(b2)
+    #z_mean = np.array(b2) # prev np
+    z_mean = torch.Tensor(b2) # prev np
     if mean is not None:
         z_mean += V @ mean
     
@@ -349,6 +366,7 @@ def glu_mean(
     # The lemma says that Cov(σ(y_i), z_i) = Cov(y_i, z_i) * E[σ'(y_i)]
     # so we need to compute E[σ'(y_i)] for each i
     act_mean = act_ev(y_mean, y_std)
-    output_mean = np.diag(cross_cov) * act_prime_ev(y_mean, y_std) + act_mean * z_mean
+    #output_mean = np.diag(cross_cov) * act_prime_ev(y_mean, y_std) + act_mean * z_mean # prev np
+    output_mean = torch.diag(cross_cov) * act_prime_ev(y_mean, y_std) + act_mean * z_mean # prev np
 
     return output_mean
