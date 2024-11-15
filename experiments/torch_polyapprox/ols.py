@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 from functools import partial
 from typing import Literal
-
+from math import floor
 from numpy.typing import ArrayLike, NDArray
 #import numpy as np
 import torch
+from torch import Tensor
 
 from .extra import sigmoid, sigmoid_prime, swish, swish_prime
 from .gelu import gelu_ev, gelu_prime_ev, gelu_poly_ev
@@ -14,13 +15,13 @@ from .relu import relu_ev, relu_prime_ev, relu_poly_ev
 
 @dataclass(frozen=True)
 class OlsResult:
-    alpha: NDArray
+    alpha: Tensor
     """Intercept of the linear model."""
 
-    beta: NDArray
+    beta: Tensor
     """Coefficients of the linear model."""
 
-    gamma: NDArray | None = None
+    gamma: Tensor | None = None
     """Coefficients for second-order interactions, if available."""
 
     fvu: float | None = None
@@ -28,20 +29,34 @@ class OlsResult:
     
     Currently only implemented for ReLU activations.
     """
-
+    @property
+    def device(self) -> torch.device:
+        return self.alpha.device
+    
+    def cpu(self) -> 'OlsResult':
+        """Create a copy of this OlsResult with tensors moved to the CPU."""
+        return OlsResult(
+            alpha=self.alpha.cpu(),
+            beta=self.beta.cpu(),
+            gamma=self.gamma.cpu() if self.gamma is not None else None,
+            fvu=self.fvu  # fvu is a float, no need to move to CPU
+        )
+        
+    def get_gamma_tensor(self):
+        nrows = floor((2*self.gamma.shape[-1]) ** 0.5)
+        gamma_tensor = torch.zeros((self.gamma.shape[0], nrows, nrows))
+        rows, cols = torch.tril_indices(nrows, nrows)
+        gamma_tensor[:, rows, cols] = self.gamma
+        return 0.5 * (gamma_tensor + gamma_tensor.mT)
+    
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """Evaluate the linear model at the given inputs."""
         y = x @ self.beta + self.alpha
-
         if self.gamma is not None:
-            outer = torch.einsum('ij,ik->ijk', x, x)
+            a = torch.einsum('bi,hij->bhj', x, self.get_gamma_tensor())
+            y += torch.einsum('bj,bhj->bh', x, a)
 
-            rows, cols = torch.tril_indices(x.shape[1], x.shape[1])
-            print(outer[:, rows, cols].shape, self.gamma.shape)
-            y += outer[:, rows, cols] @ self.gamma.T
-
-        return y
-    
+        return y    
 
 
 # Mapping from activation functions to EVs
@@ -67,14 +82,14 @@ ACT_TO_POLY_EVS = {
 
 
 def ols(
-    W1: NDArray, 
-    b1: NDArray,
-    W2: NDArray,
-    b2: NDArray,
+    W1: torch.Tensor, 
+    b1: torch.Tensor,
+    W2: torch.Tensor,
+    b2: torch.Tensor,
     *,
     act: str = 'gelu',
-    mean: NDArray | None = None,
-    cov: NDArray | None = None,
+    mean: torch.Tensor | None = None,
+    cov: torch.Tensor | None = None,
     order: Literal['linear', 'quadratic'] = 'linear',
     return_fvu: bool = False,
     debug_mode: bool = False
@@ -102,6 +117,8 @@ def ols(
     if mean is not None:
         mean = mean.squeeze()
     
+    cov = torch.eye(d_input) if cov is None else cov
+    mean = torch.zeros(d_input) if mean is None else mean
     device = W1.device
     # Preactivations are Gaussian; compute their mean and standard deviation
     # For MNIST, add actual instance values in comments
@@ -190,19 +207,23 @@ def ols(
 
     debug_print(f'End of linear work. Next handles quadratic, which currently only works for N(0,1)')
     if order == 'quadratic':
-        assert cov == None and mean == None, ValueError('Only N(0,1) known to work!!')
+        #assert cov == None and mean == None, ValueError('Only N(0,1) known to work!!')
         debug_print(f'5.1 check')
         # Need to validate, update code s.t. all tensors on same device. All torch tensor inits default to 'cpu'. 
-        cov = cov_x = cov if cov is not None else torch.eye(d_input).to(device) # prev np
-        mu = mean if mean is not None else torch.zeros(d_input).to(device) # prev np
+        
+        # sets cov_x to cov, if cov exists
+        # sets cov and cov_x to identity, if cov is not provided. So that cov can be acted on as if it's identity.
+        # Could have just done that in the beginning and omitted some if statements...
+        #cov = cov_x = cov if cov is not None else torch.eye(d_input).to(device) # prev np
+        #mu = mean if mean is not None else torch.zeros(d_input).to(device) # prev np
         rows, cols = torch.tril_indices(d_input, d_input).to(device)
 
         cov_y = W1 @ cov @ W1.T
-        xcov = cov_x @ W1.T
+        xcov = cov @ W1.T
 
         #cov_x = cov
-        mean_y = mu @ W1.T + b1
-        var_x = torch.diag(cov_x).to(device) # prev np
+        mean_y = mean @ W1.T + b1
+        var_x = torch.diag(cov).to(device) # prev np
         debug_print(f'5.2 check')
 
         #Cov_x = torch.array([ # prev np. Need torch.Tensor rather than np.array. To fix.
@@ -211,13 +232,13 @@ def ols(
         #]).T
         
         debug_print(f'Attempting to produce matrix Cov_x: \n',
-                    f'[var_x[rows] {var_x[rows].shape}, cov_x[rows, cols] {cov_x[rows, cols].shape}],\n',
-                    f'[cov_x[cols, rows] {cov_x[cols, rows].shape}, var_x[cols] {var_x[cols].shape}],].T')
+                    f'[var_x[rows] {var_x[rows].shape}, cov_x[rows, cols] {cov[rows, cols].shape}],\n',
+                    f'[cov_x[cols, rows] {cov[cols, rows].shape}, var_x[cols] {var_x[cols].shape}],].T')
         Cov_x = torch.Tensor([ # prev np. Need torch.Tensor rather than np.array. To fix.
-            [var_x[rows].cpu().numpy(), cov_x[rows, cols].cpu().numpy()],
-            [cov_x[cols, rows].cpu().numpy(), var_x[cols].cpu().numpy()],
+            [var_x[rows].cpu().numpy(), cov[rows, cols].cpu().numpy()],
+            [cov[cols, rows].cpu().numpy(), var_x[cols].cpu().numpy()],
         ]).to(device).T
-        debug_print(f'Cov_x {Cov_x.shape}, device {Cov_x.device}')
+        debug_print(f'Cov_x {Cov_x.shape}')
         # iiinteresting. swapping to .numpy() works, obviously this is not desirable as we want things
         # completely on-device, which wont work if using device='cuda:0'.
 
@@ -230,9 +251,9 @@ def ols(
         #Mean_x = np.array([mu[rows], mu[cols]]).T # prev np
         #Var_y = np.diag(cov_y) # prev np
         debug_print(f'Attempting to produce matrix Mean_x: \n',
-                    f'Mean_x = [mu[rows] {mu[rows].shape}, mu[cols] {mu[cols].shape}].T')
+                    f'Mean_x = [mu[rows] {mean[rows].shape}, mu[cols] {mean[cols].shape}].T')
         #Mean_x = torch.Tensor([mu[rows], mu[cols]]).T # prev np
-        Mean_x = torch.Tensor([mu[rows].cpu().numpy(), mu[cols].cpu().numpy()]).to(device).T # prev np
+        Mean_x = torch.Tensor([mean[rows].cpu().numpy(), mean[cols].cpu().numpy()]).to(device).T # prev np
         Var_y = torch.diag(cov_y).to(device) # prev np
 
         
@@ -241,11 +262,12 @@ def ols(
         debug_print(f'Attempting master_theorem. On device {device}. Takes args:\n',
         f'Mean_x {Mean_x.shape}, Cov_x {Cov_x.shape}, mean_y[..., None] {mean_y[..., None].shape}, XCov {Xcov.shape}')
         
+        #MNIST: [307720, 2],  [307720, 2, 2],  [256, 1],  [256, 307720, 2]
         coefs = master_theorem(
             Mean_x, Cov_x, mean_y[..., None], Var_y[..., None], Xcov
         )
         
-        debug_print(f'5.4 check')
+        debug_print(f'5.4 check on master thm coefficients, quad: {coefs[0].shape}, lin: {coefs[1].shape}, const: {coefs[2].shape}')
         # Compute univariate integrals
         try:
             poly_ev = ACT_TO_POLY_EVS[act]

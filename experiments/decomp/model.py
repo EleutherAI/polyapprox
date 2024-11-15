@@ -1,3 +1,4 @@
+import os
 import torch
 from torch import nn, Tensor
 from torch.optim import AdamW
@@ -9,7 +10,6 @@ from jaxtyping import Float
 from tqdm import tqdm
 from pandas import DataFrame
 from einops import *
-
 from .components import Linear, Bilinear
 
 def _collator(transform=None):
@@ -89,6 +89,9 @@ class _Config(PretrainedConfig):
 
         super().__init__(**kwargs)
 
+class QuadraticModel(PreTrainedModel):
+    pass
+
 class FFNModel(PreTrainedModel):
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -98,27 +101,33 @@ class FFNModel(PreTrainedModel):
         bias = config.bias
         in_bias = config.in_bias
         out_bias = config.out_bias
+        n_layer = config.n_layer
         if bias:
             in_bias = True
             out_bias = True
 
-        # Simple feedforward architecture
-        self.embed = Linear(d_input, d_hidden, bias=in_bias)
         self.activation = nn.ReLU()
+        self.blocks = nn.ModuleList(
+            [Linear(d_input, d_hidden, bias=in_bias)] + [
+             Linear(d_hidden, d_hidden, bias=in_bias) for _ in range(n_layer-1)])
         self.head = Linear(d_hidden, d_output, bias=out_bias)
-
         self.criterion = nn.CrossEntropyLoss()
-        self.accuracy = lambda y_hat, y: (y_hat.argmax(dim=-1) == y).float().mean()
 
     def forward(self, x: Float[Tensor, "... inputs"]) -> Float[Tensor, "... outputs"]:
-        x = self.embed(x.flatten(start_dim=1))
-        x = self.activation(x)
+        x = x.flatten(start_dim=1)
+        for layer in self.blocks:
+            x = self.activation(layer(x))
         return self.head(x)
 
+    def accuracy(self, y_hat, y):
+        return (y_hat.argmax(dim=-1) == y).float().mean()
     @property
     def w_e(self):
         return self.embed.weight.data
 
+    @property
+    def w_block(self):
+        return torch.stack([self.blocks[i].weight.data for i in range(self.n_layer-1)], dim=0)
     @property
     def w_u(self):
         return self.head.weight.data
@@ -151,7 +160,25 @@ class FFNModel(PreTrainedModel):
 
         return loss, accuracy
 
-    def fit(self, train, test, transform=None, disable=False):
+    def save_checkpoint(model, metrics, epoch, filename='relu_model'):
+        folder = '/mnt/ssd-1/mechinterp/alice/polyapprox/polyapprox/experiments/ckpts/'
+        #filepath=os.path.join(base_filepath, f'{filename}_epoch{str(epoch).zfill(4)}.pth')
+        filepath = folder + f'{filename}_epoch{str(epoch).zfill(4)}.pth'
+        #directory = os.path.dirname(base_filepath)
+        current_file_path = os.path.abspath(__file__)
+        #print(current_file_path)
+        # Check if the directory exists, and if not, create it
+        #if not os.path.exists(directory):
+        #    os.makedirs(directory)
+        #filepath = f'{base_filepath}_epoch{str(epoch).zfill(4)}'
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'metrics': metrics
+        }
+        torch.save(checkpoint, filepath)
+
+    def fit(self, train, test, transform=None, disable=False, test_transform=False, checkpoint_epochs=None):
         torch.manual_seed(self.config.seed)
         torch.set_grad_enabled(True)
 
@@ -159,12 +186,18 @@ class FFNModel(PreTrainedModel):
         scheduler = CosineAnnealingLR(optimizer, T_max=self.config.epochs)
 
         loader = DataLoader(train, batch_size=self.config.batch_size, shuffle=True, drop_last=True, collate_fn=_collator(transform))
-        test_x, test_y = test.x, test.y
+        test_transf = transform if test_transform else None
+        test_loader = DataLoader(test, batch_size=test.y.size(0), shuffle=False, drop_last=True, collate_fn=_collator(test_transf))
+        #test_x, test_y = test.x, test.y
 
         pbar = tqdm(range(self.config.epochs), disable=disable)
         history = []
+        
+        #checkpoints = {}
+        
+        checkpoint_epochs = checkpoint_epochs or []
 
-        for _ in pbar:
+        for epoch_num in pbar:
             epoch = []
             for x, y in loader:
                 loss, acc = self.train().step(x, y)
@@ -174,7 +207,7 @@ class FFNModel(PreTrainedModel):
                 loss.backward()
                 optimizer.step()
             scheduler.step()
-
+            test_x, test_y = next(iter(test_loader))
             val_loss, val_acc = self.eval().step(test_x, test_y)
 
             metrics = {
@@ -186,6 +219,10 @@ class FFNModel(PreTrainedModel):
 
             history.append(metrics)
             pbar.set_description(', '.join(f"{k}: {v:.3f}" for k, v in metrics.items()))
+            
+            # Checkpoint saving
+            if epoch_num+1 in checkpoint_epochs:
+                self.save_checkpoint(self, epoch_num+1)
 
         torch.set_grad_enabled(False)
         return DataFrame.from_records(history, columns=['train/loss', 'train/acc', 'val/loss', 'val/acc'])
