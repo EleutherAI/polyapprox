@@ -1,127 +1,165 @@
 import torch.nn as nn
 from decomp.model import FFNModel
-from decomp.datasets import MNIST
+from decomp.datasets import MNIST, CIFAR10
 from kornia.augmentation import RandomGaussianNoise
 from extra.ipynb_utils import test_model_acc
 from torch_polyapprox.ols import ols
 import torch
+from torch import Tensor
 from schedulefree import ScheduleFreeWrapper
+from tqdm import tqdm
+from typing import List
+from itertools import combinations, chain
+import matplotlib.pyplot as plt
+import numpy as np
 
-def compose_modules(R2, R1):
-    return lambda x: R2(R1(x))
+def powerset(iterable):
+    s = list(iterable)
+    return list(chain.from_iterable(combinations(s, r) for r in range(len(s)+1)))
+def compose_n_modules(Rs: List):
+    if not Rs:
+        return lambda x: x
+    else:
+        first, *rest = Rs
+        return lambda x: first(compose_n_modules(rest)(x))
+def nk_weave(comb, List1, List2):
+    n = len(List1)
+    assert len(List1) == len(List2)
+    new_list = []
+    for i in range(n):
+        if i in comb:
+            new_list.append(List1[i])
+        else:
+            new_list.append(List2[i])
+    return new_list
+def gamma_decompose(out_vec, gamma_mat):
+    if isinstance(out_vec, Tensor):
+        q = torch.einsum(gamma_mat, out_vec, 'h,hij->ij')
+    elif isinstance(out_vec, int):
+        q = gamma_mat[out_vec]
+    q = 0.5 * (q + q.mT)
+    print(q.shape)
+    eigvals, eigvecs = torch.linalg.eigh(q)
+    return eigvals, eigvecs
 class Minimal_FFN(nn.Module):
     def __init__(self, data, device='cpu'):
         super().__init__()
-        self.w_e = nn.Parameter(data['We']).to(device)
-        self.w_u = nn.Parameter(data['Wu']).to(device)
+        self.W1 = nn.Parameter(data['W1']).to(device)
+        self.W2 = nn.Parameter(data['W2']).to(device)
         self.activation = nn.ReLU()
-        self.b_e = nn.Parameter(data['be']).to(device)
-        self.b_u = nn.Parameter(data['bu']).to(device)
+        self.b1 = nn.Parameter(data['b1']).to(device)
+        self.b2 = nn.Parameter(data['b2']).to(device)
 
-    def enc(self, x):
+    def enc(self, x: Tensor):
         x = x.flatten(start_dim=1)
-        x = self.activation(x @ self.w_e.T + self.b_e)
+        x = self.activation(x @ self.W1.T + self.b1)
         return x
-    def dec(self, x):
-        return x @ self.w_u.T + self.b_u
-    def forward(self, x):
+    def dec(self, x: Tensor):
+        return x @ self.W2.T + self.b2
+    def forward(self, x: Tensor):
         return self.dec(self.enc(x))
 
-    def approx_fit(self, order='linear', mode='all'):
-        W1 = self.w_e.detach()
-        W2 = self.w_u.detach()
-        b1 = self.b_e.detach()#.cpu().data.numpy()
-        b2 = self.b_u.detach()
-        print(W1.shape, W2.shape, b1.shape, b2.shape)
-        if mode == 'enc':
-            W2 = torch.eye(W2.shape[0])
-            b2 = torch.zeros_like(b2)
-        #elif mode == 'dec':
-        #    W1 = torch.zeros_like(W1)
+    def approx_fit(self, order='linear'):
+        W1 = self.W1.detach()
+        W2 = self.W2.detach()
+        b1 = self.b1.detach()
+        b2 = self.b2.detach()
         return ols(W1,b1,W2,b2,order=order,act='relu')
 
 if __name__ == "__main__":
-    device = 'cpu'
+    device = 'cuda:4'
     dataset = 'mnist'
+    fitting_all = True
+    fitting_quadratic = True
     d_inputs = {
         'mnist': 784,
         'fmnist': 784,
         'cifar': 3072
     }
-    datasets = {'mnist': (MNIST(train=True, device=device), MNIST(train=False, device=device))}
-    cpu_datasets = {'mnist': (MNIST(train=True, device='cpu'), MNIST(train=False, device='cpu'))}
+    datasets = {
+        'mnist': (MNIST(train=True, device=device), MNIST(train=False, device=device)),
+        'cifar': (CIFAR10(train=True, device=device), CIFAR10(train=False, device=device))}
+    cpu_datasets = {
+        'mnist': (MNIST(train=True, device='cpu'), MNIST(train=False, device='cpu')),
+        'cifar': (CIFAR10(train=True, device='cpu'), CIFAR10(train=False, device='cpu'))}
     cfg = {
-        'wd': 0.2,
-        'epochs': 4,
+        'lr': 1e-3, # default: 1e-3
+        'wd': 0.0,
+        'epochs': 128,
         'd_input': d_inputs[dataset],
         'bias': True,
         'bsz': 2**11,
         'device': device,
         'train': datasets[dataset][0],
         'test': datasets[dataset][1],
-        'noise': RandomGaussianNoise(std=0.4)
+        'noise': RandomGaussianNoise(std=0.1),
+        #'noise': None,
+        'n_layer': 1
     }
     relu_model = FFNModel.from_config(
+            lr=cfg['lr'],
             wd=cfg['wd'],
             epochs=cfg['epochs'],
             batch_size=cfg['bsz'],
             d_input=cfg['d_input'],
             bias=cfg['bias'],
-            n_layer=2
+            n_layer=cfg['n_layer']
     ).to(device)
     train, test = datasets[dataset][0], datasets[dataset][1]
-    metrics = relu_model.fit(train, test, cfg['noise'])
-    
-    # convert relu_model to data_dict object
-    data1, data2 = {}, {}
-    data1['We'] = relu_model.blocks[0].weight.data.cpu().detach()
-    data1['be'] = relu_model.blocks[0].bias.data.cpu().detach()
-    data1['Wu'] = relu_model.blocks[1].weight.data.cpu().detach()
-    data1['bu'] = relu_model.blocks[1].bias.data.cpu().detach()
-    
-    data2['We'] = data1['Wu']
-    data2['be'] = data1['bu']
-    data2['Wu'] = relu_model.head.weight.data.cpu().detach()
-    data2['bu'] = relu_model.head.bias.data.cpu().detach()
-    
-    Relu1 = Minimal_FFN(data1)
-    Relu2 = Minimal_FFN(data2)
-    lin1 = Relu1.approx_fit(mode='enc').cpu()
-    Lin1 = Relu1.approx_fit().cpu()
-    lin2 = Relu2.approx_fit().cpu()
-    quad1 = Relu1.approx_fit(order='quadratic',mode='enc').cpu()
-    Quad1 = Relu1.approx_fit(order='quadratic').cpu()
-    quad2 = Relu2.approx_fit(order='quadratic').cpu()
+    metrics = relu_model.fit(train, test, cfg['noise'], checkpoint_epochs=[1,2,4,8,16,32,64,128])
     cpu_test = cpu_datasets[dataset][1]
-    r1 = lambda x: Relu1.enc(x)
-    r2 = lambda x: Relu2.dec(Relu2.activation(x))
-    r2r1 = lambda x: Relu2.dec(Relu2.activation(Relu1(x)))
+    if fitting_all:
+        data = [relu_model.get_layer_data(i) for i in range(relu_model.n_layer)][::-1]
+        assert torch.allclose(data[-1]['W1'], relu_model.blocks[0].cpu().weight)
+        Relus = [Minimal_FFN(datum) for datum in data]
+        linear_fits = [Relu.approx_fit() for Relu in tqdm(Relus)]
+        quad_fits = [Relu.approx_fit('quadratic') for Relu in tqdm(Relus)]
+        all_subsets = powerset(range(cfg['n_layer']))
+        print('-'*20, 'Testing linear fits', '-'*20)
+        for comb in all_subsets:
+            franken = compose_n_modules(nk_weave(comb, linear_fits, Relus))
+            print(f'{comb}: {test_model_acc(franken, test_set=cpu_test)}')
+        print('-'*20, 'Testing quadratic fits', '-'*17)
+        for comb in all_subsets:
+            franken = compose_n_modules(nk_weave(comb, quad_fits, Relus))
+            print(f'{comb}: {test_model_acc(franken, test_set=cpu_test)}')
     
-    l2l1 = lambda x: lin2(lin1(x)) # 84% with enc mode
-    l2L1 = lambda x: lin2(lin1(x)) # 84% with enc mode
-    q2q1 = lambda x: quad2(quad1(x)) # 91.5% with quad mode
-    l2q1 = lambda x: lin2(quad1(x)) # bad fit might be q1 incorrectly fit, factoring output. should be just enc.
-    q2l1 = lambda x: quad2(lin1(x))
-    
-    q2r1 = lambda x: quad2(Relu1.enc(x)) # 95.9% without enc mode, 92% with
-    l2r1 = lambda x: lin2(Relu1.enc(x)) # 95.5% without enc mode, 92% with
-    r2q1 = lambda x: Relu2.dec(Relu2.activation(quad1(x))) # 95% without enc mode, 13.7% with
-    r2l1 = lambda x: Relu2.dec(Relu2.activation(lin1(x))) # 78% without enc mode,  12.3% with
-    #Composed_quad = 
-    #print('-'*10, 'Relu relu baseline', '-'*10)
-    print(f'r2r1: {test_model_acc(r2r1, test_set=cpu_test)}')
-    #print(f'relu_model: {test_model_acc(relu_model, test_set=cpu_test)}')
-    print(f'Lin + quad:')
-    print(f'l2l1: {test_model_acc(l2l1, test_set=cpu_test)}')
-    print(f'l2l1: {test_model_acc(l2l1, test_set=cpu_test)}')
-    print(f'q2q1: {test_model_acc(q2q1, test_set=cpu_test)}')
-    print(f'l2q1: {test_model_acc(l2q1, test_set=cpu_test)}')
-    print(f'q2l1: {test_model_acc(q2l1, test_set=cpu_test)}')
-    print('-'*10, 'Relu+quad/lin', '-'*10)
-    print(f'q2r1: {test_model_acc(q2r1, test_set=cpu_test)}')
-    print(f'l2r1: {test_model_acc(l2r1, test_set=cpu_test)}')
-    print(f'r2q1: {test_model_acc(r2q1, test_set=cpu_test)}')
-    print(f'r2l1: {test_model_acc(r2l1, test_set=cpu_test)}')
-    #print(f'Accuracies: Quad2(Quad1) {test_model_acc(Composed_quad, test_set=cpu_test)}')
-    #print(f'Accuracies: Lin1 {test_model_acc(lin1, test_set=cpu_test)}, Lin2 {test_model_acc(lin2, test_set=cpu_test)}')
+    # take quad_fit_1. Compute SVD
+    g, b, a = quad_fits[0].get_gamma_tensor(), quad_fits[0].beta, quad_fits[0].alpha
+
+    u, s, v = torch.svd(b) # print s
+    out_logit = 7
+    #print(f'g {g.shape}')
+    #eigvals, eigvecs = gamma_decompose(out_logit, g)
+    #eigvals, eigvecs = torch.linalg.eig(g[out_logit])
+    eigvals = torch.linalg.eigvals(g[out_logit])
+    print(eigvals.shape)
+    print(f'singular values: {s}')
+    #print(f'eigvals shape {eigvals.shape}\n eigvals\n{eigvals}')
+    # now check output logit top eigs.
+    #x = torch.arange(0, 784).numpy()
+    #y = eigvals.numpy()
+    #z = s.numpy()
+    print(f'sample norm: {torch.norm(test.x[0])}')
+    plotting=False
+    if plotting:
+        plt.figure(figsize=(10, 5))  # Optional, adjust the figure size as desired
+        plt.plot(x, y, label='Trace 1', color='blue')  # First trace
+        plt.plot(x, z, label='Trace 2', color='orange')  # Second trace
+
+        # Adding labels and title
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.title('Line Graph of Two Traces')
+        plt.legend()
+
+        # Display the plot
+        plt.show()
+    else:
+        #pass
+        print(f'L2: singular {torch.norm(s)}, eig7 {torch.norm(eigvals)}')
+        print(f'L1: singular {torch.norm(s,p=1)}, eig7 {torch.norm(eigvals,p=1)}')
+        
     print("Training complete.")
+    
+# Next up: 

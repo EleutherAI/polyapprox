@@ -102,22 +102,35 @@ class FFNModel(PreTrainedModel):
         in_bias = config.in_bias
         out_bias = config.out_bias
         n_layer = config.n_layer
+        self.n_layer = n_layer
         if bias:
             in_bias = True
             out_bias = True
 
         self.activation = nn.ReLU()
-        self.blocks = nn.ModuleList(
-            [Linear(d_input, d_hidden, bias=in_bias)] + [
-             Linear(d_hidden, d_hidden, bias=in_bias) for _ in range(n_layer-1)])
-        self.head = Linear(d_hidden, d_output, bias=out_bias)
+        #self.embed = Linear(d_input, d_hidden, bias=in_bias)
+        self.blocks = nn.ModuleList([Linear(d_input, d_hidden, bias=in_bias)] +
+             [Linear(d_hidden, d_hidden, bias=in_bias) for _ in range(2*n_layer-2)] +
+             [Linear(d_hidden, d_output, bias=out_bias)])
+        #self.head = Linear(d_hidden, d_output, bias=out_bias)
         self.criterion = nn.CrossEntropyLoss()
 
     def forward(self, x: Float[Tensor, "... inputs"]) -> Float[Tensor, "... outputs"]:
         x = x.flatten(start_dim=1)
-        for layer in self.blocks:
-            x = self.activation(layer(x))
-        return self.head(x)
+        #x = self.activation(self.embed(x))
+        for idx in range(len(self.blocks)):
+            x = self.blocks[idx](x)
+            if idx % 2 == 0: #preact. 1 ~> postact
+                x = self.activation(x)
+        return x
+
+    def get_layer_data(self, layer=0):
+        data = {}
+        data['W1'] = self.blocks[2*layer].weight.data.detach().cpu()
+        data['b1'] = self.blocks[2*layer].bias.data.detach().cpu()
+        data['W2'] = self.blocks[2*layer+1].weight.data.detach().cpu()
+        data['b2'] = self.blocks[2*layer+1].bias.data.detach().cpu()
+        return data
 
     def accuracy(self, y_hat, y):
         return (y_hat.argmax(dim=-1) == y).float().mean()
