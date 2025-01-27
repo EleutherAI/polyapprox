@@ -15,10 +15,71 @@ from einops import einsum
 from kornia.augmentation import RandomGaussianNoise
 
 from decomp.model import Model, FFNModel, _Config
-from decomp.datasets import MNIST, FMNIST, CIFAR10
+from decomp.datasets import MNIST, FMNIST, CIFAR10 #, EMNIST, SVHN, MNIST1D
 from decomp.plotting import plot_explanation, plot_eigenspectrum
+#from mnist_2l import Minimal_FFN
 from tqdm import tqdm
 from torch_polyapprox.ols import ols
+
+device = 'cpu'
+
+D_INPUTS = {
+    'mnist': 784,
+    'fmnist': 784,
+    'emnist': 784,
+    'mnist1d': 40,
+    'cifar': 3072,
+    'svhn': 3072,
+}
+def init_datasets(device='cpu'):
+    datasets = {
+        'mnist': (MNIST(train=True, device=device), MNIST(train=False, device=device)),
+        'fmnist': (FMNIST(train=True, device=device), FMNIST(train=False, device=device)),
+        #'emnist': (EMNIST(train=True, device=device), EMNIST(train=False, device=device)),
+        #'mnist1d': (MNIST1D(train=True, device=device), MNIST1D(train=False, device=device)),
+        'cifar': (CIFAR10(train=True, device=device), CIFAR10(train=False, device=device)),
+        #'svhn': (SVHN(train=True, device=device), SVHN(train=False, device=device))
+    }
+    return datasets
+#if __name__ == "__main__":
+
+datasets = init_datasets()
+dataset = 'mnist'
+
+def init_configs(dataset=None, device='cpu'):
+    DEFAULT_CONFIG = {
+        'lr': 1e-3, # default: 1e-3
+        'wd': 0.2,
+        'epochs': 128,
+        'd_input': D_INPUTS[dataset],
+        'bias': True,
+        'bsz': 2**11,
+        'device': device,
+        'train': datasets[dataset][0],
+        'test': datasets[dataset][1],
+        'noise': RandomGaussianNoise(std=0.1),
+        #'noise': None,
+        'n_layer': 6
+    }
+    return DEFAULT_CONFIG
+
+CPU_DATASETS = {
+    'mnist': (MNIST(train=True, device='cpu'), MNIST(train=False, device='cpu')),
+    'cifar': (CIFAR10(train=True, device='cpu'), CIFAR10(train=False, device='cpu'))}
+DEFAULT_CONFIG = {
+    'lr': 1e-3, # default: 1e-3
+    'wd': 0.2,
+    'epochs': 128,
+    'd_input': D_INPUTS[dataset],
+    'bias': True,
+    'bsz': 2**11,
+    'device': device,
+    'train': datasets[dataset][0],
+    'test': datasets[dataset][1],
+    'noise': RandomGaussianNoise(std=0.1),
+    #'noise': None,
+    'n_layer': 6
+}
 
 def approx_fit(model, order='linear'):
     W1 = model.w_e.detach()
@@ -46,10 +107,11 @@ def test_model_acc(model,
                    proj = None,
                    loss = None):
     assert 0 <= num_samples <= test_set.y.size(0), 'num_samples too large!!'
-    if loss is None: # if not provided, use accuracy
-        loss = lambda y_hat, y: (y_hat.argmax(dim=-1) == y).float().mean()
+    
     #print(test.x.shape)
+    x = test_set.x
     inp = test_set.x.flatten(start_dim=1)
+    #print(inp, inp.shape)
     #assert inp.device == model.device
     if transform is not None:
         #print(inp.shape)
@@ -60,7 +122,11 @@ def test_model_acc(model,
         pass
         #inp = test.x.flatten(start_dim=1)
     fwd = model(inp[:num_samples])
+    if loss is None: # if not provided, use accuracy
+        loss = lambda y_hat, y: (y_hat.argmax(dim=-1) == y).float().mean()
     return loss(fwd, test_set.y[:num_samples]).item()
+    #else: # assume kl, i know, horrible practice
+    #    return loss(fwd)
 
 
 def np_gamma_to_B(gamma_mat):

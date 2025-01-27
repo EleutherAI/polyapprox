@@ -129,7 +129,6 @@ def isserlis(cov: Tensor, indices: list[int]) -> Tensor:
         for partition in pair_partitions(indices)
     )
 
-
 def master_theorem(
     mu_x: Tensor,
     cov_x: Tensor,
@@ -187,6 +186,33 @@ def master_theorem(
 
     coefs.reverse()
     return coefs
+
+def batched_master_theorem(n_batch, *args):
+    """
+    A wrapper around master_theorem that processes inputs in batches.
+
+    Args:
+        n_batch (int): The size of each batch to process.
+        *args: The same arguments as master_theorem, expected to have a batch_shape dimension.
+
+    Returns:
+        list: A list of coefficients computed by master_theorem for each batch.
+    """
+    # Determine the batch shape from the first argument
+    batch_shape = args[0].shape[:-1]
+    total_batches = batch_shape[0]
+
+    # Initialize a list to store results
+    all_coefs = []
+
+    # Process in chunks of size n_batch
+    for start in range(0, total_batches, n_batch):
+        end = min(start + n_batch, total_batches)
+        batch_args = [args[0][start:end], args[1][start:end], args[2], args[3], args[4][:,start:end]]
+        coefs = master_theorem(*batch_args)
+        all_coefs.append(coefs)
+
+    return [torch.cat([batch_coefs[i] for batch_coefs in all_coefs], dim=-1) for i in range(3)]
 
 
 def pair_partitions(elements: list) -> list:

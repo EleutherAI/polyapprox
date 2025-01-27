@@ -3,10 +3,10 @@ from decomp.model import FFNModel
 from decomp.datasets import MNIST, CIFAR10
 from kornia.augmentation import RandomGaussianNoise
 from extra.ipynb_utils import test_model_acc
-from torch_polyapprox.ols import ols
+from torch_polyapprox.ols import ols, ols_unstable
 import torch
 from torch import Tensor
-from schedulefree import ScheduleFreeWrapper
+#from schedulefree import ScheduleFreeWrapper
 from tqdm import tqdm
 from typing import List
 from itertools import combinations, chain
@@ -42,11 +42,17 @@ def gamma_decompose(out_vec, gamma_mat):
     eigvals, eigvecs = torch.linalg.eigh(q)
     return eigvals, eigvecs
 class Minimal_FFN(nn.Module):
-    def __init__(self, data, device='cpu'):
+    def __init__(self, data, act_fn = 'relu', device='cpu'):
         super().__init__()
         self.W1 = nn.Parameter(data['W1']).to(device)
         self.W2 = nn.Parameter(data['W2']).to(device)
-        self.activation = nn.ReLU()
+        self.act_fn = act_fn
+        if act_fn == 'relu':
+            self.activation = nn.ReLU()
+        elif act_fn == 'gelu':
+            self.activation = nn.GELU()
+        else:
+            raise ValueError(f'act_fn {act_fn} not supported! Only supports relu, gelu')
         self.b1 = nn.Parameter(data['b1']).to(device)
         self.b2 = nn.Parameter(data['b2']).to(device)
 
@@ -59,12 +65,15 @@ class Minimal_FFN(nn.Module):
     def forward(self, x: Tensor):
         return self.dec(self.enc(x))
 
-    def approx_fit(self, order='linear'):
+    def approx_fit(self, order='linear', use_unstable=False):
         W1 = self.W1.detach()
         W2 = self.W2.detach()
         b1 = self.b1.detach()
         b2 = self.b2.detach()
-        return ols(W1,b1,W2,b2,order=order,act='relu')
+        if use_unstable:
+            return ols_unstable(W1,b1,W2,b2,order=order,act=self.act_fn)
+        else:
+            return ols(W1,b1,W2,b2,order=order,act=self.act_fn)
 
 if __name__ == "__main__":
     device = 'cuda:4'

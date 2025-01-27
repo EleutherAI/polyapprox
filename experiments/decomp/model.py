@@ -1,10 +1,10 @@
 import os
 import torch
 from torch import nn, Tensor
-from torch.optim import AdamW
+#import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
-
+from copy import deepcopy
 from transformers import PretrainedConfig, PreTrainedModel
 from jaxtyping import Float
 from tqdm import tqdm
@@ -63,11 +63,13 @@ class _Config(PretrainedConfig):
         n_layer: int = 1,
         d_input: int = 784,
         d_output: int = 10,
-        bias: bool = False,
-        in_bias: bool = False,
+        bias: bool = True,
+        in_bias: bool = True,
         out_bias: bool = False,
         residual: bool = False,
         seed: int = 42,
+        optim = 'AdamW',
+        scheduler = None,
         **kwargs
     ):
         self.lr = lr
@@ -75,7 +77,6 @@ class _Config(PretrainedConfig):
         self.epochs = epochs
         self.batch_size = batch_size
         self.seed = seed
-
         self.d_hidden = d_hidden
         self.n_layer = n_layer
         self.d_input = d_input
@@ -84,10 +85,32 @@ class _Config(PretrainedConfig):
         self.in_bias = in_bias
         self.out_bias = out_bias
         self.residual = residual
-
-
+        self.optim = self._load_optimizer(optim)
+        self.scheduler = self._load_scheduler(scheduler)
 
         super().__init__(**kwargs)
+
+    
+    def _load_optimizer(self, optim):
+        if optim == 'AdamW':
+            return torch.optim.AdamW #(self.parameters(), lr=self.config.lr, weight_decay=self.wd)
+        elif optim == 'SGD':
+            return torch.optim.SGD #(self.parameters(), lr=self.config.lr, weight_decay=self.wd)
+        else:
+            print(f'Unrecognized scheduler {optim}, defaulting to SGD')
+            return torch.optim.SGD #(self.parameters(), lr=self.config.lr, weight_decay=self.wd)
+        
+    def _load_scheduler(self, scheduler = None):
+        if scheduler is None:
+            return None
+        elif scheduler == 'cosine':
+            return CosineAnnealingLR
+        elif scheduler == 'linear_warmup':
+            return torch.optim.lr_scheduler.LinearLR
+        else:
+            print('Unrecognized scheduler, using None')
+            return None
+
 
 class QuadraticModel(PreTrainedModel):
     pass
@@ -173,42 +196,64 @@ class FFNModel(PreTrainedModel):
 
         return loss, accuracy
 
-    def save_checkpoint(model, metrics, epoch, filename='relu_model'):
-        folder = '/mnt/ssd-1/mechinterp/alice/polyapprox/polyapprox/experiments/ckpts/'
+    def save_checkpoint(self, metrics, epoch, steps,
+                        filename='relu1lmnist', saving_steps=False):
+        #folder = '/mnt/ssd-1/mechinterp/alice/polyapprox/polyapprox/experiments/ckpts/'
+        folder = '/Users/alicerigg/Code/polyapprox/experiments/checkpoints/'
         #filepath=os.path.join(base_filepath, f'{filename}_epoch{str(epoch).zfill(4)}.pth')
-        filepath = folder + f'{filename}_epoch{str(epoch).zfill(4)}.pth'
+        #filepath = folder + f'{filename}_e{str(epoch).zfill(4)}.pth'
+        if saving_steps:
+            filepath = folder + f'{filename}/s{str(steps).zfill(7)}.pth'
+        else:
+            filepath = folder + f'{filename}/e{str(epoch).zfill(4)}.pth'
         #directory = os.path.dirname(base_filepath)
-        current_file_path = os.path.abspath(__file__)
+        #current_file_path = os.path.abspath(__file__)
         #print(current_file_path)
         # Check if the directory exists, and if not, create it
         #if not os.path.exists(directory):
         #    os.makedirs(directory)
         #filepath = f'{base_filepath}_epoch{str(epoch).zfill(4)}'
+        #print(filepath)
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'steps': steps,
+            'model_state_dict': self.state_dict(),
             'metrics': metrics
         }
-        torch.save(checkpoint, filepath)
+        torch.save(self.state_dict(), filepath)
 
-    def fit(self, train, test, transform=None, disable=False, test_transform=False, checkpoint_epochs=None):
+    def fit(self,
+            train,
+            test,
+            transform=None,
+            disable=False,
+            test_transform=False,
+            checkpoint_epochs=None,
+            checkpoint_steps=None,
+            ckpt_dir='relu1lmnist',
+            return_ckpts=False
+        ):
         torch.manual_seed(self.config.seed)
         torch.set_grad_enabled(True)
 
-        optimizer = AdamW(self.parameters(), lr=self.config.lr, weight_decay=self.config.wd)
-        scheduler = CosineAnnealingLR(optimizer, T_max=self.config.epochs)
+        optimizer = self.config.optim(self.parameters(), lr=self.config.lr, weight_decay=self.config.wd)
+        if self.config.scheduler is not None:
+            scheduler = self.config.scheduler(optimizer, T_max=self.config.epochs)
+        else:
+            scheduler = None
 
         loader = DataLoader(train, batch_size=self.config.batch_size, shuffle=True, drop_last=True, collate_fn=_collator(transform))
         test_transf = transform if test_transform else None
         test_loader = DataLoader(test, batch_size=test.y.size(0), shuffle=False, drop_last=True, collate_fn=_collator(test_transf))
-        #test_x, test_y = test.x, test.y
 
         pbar = tqdm(range(self.config.epochs), disable=disable)
         history = []
-        
-        #checkpoints = {}
+        ckpts = []
+        num_steps = 0
+        images_seen = 0
         
         checkpoint_epochs = checkpoint_epochs or []
+        checkpoint_steps = checkpoint_steps or []
 
         for epoch_num in pbar:
             epoch = []
@@ -219,7 +264,17 @@ class FFNModel(PreTrainedModel):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-            scheduler.step()
+                num_steps += 1
+
+                # Checkpoint saving for steps
+                if num_steps in checkpoint_steps:
+                    if return_ckpts:
+                        ckpts.append(deepcopy(self.state_dict()))
+                    else:
+                        self.save_checkpoint({}, epoch_num+1, num_steps,
+                        filename=ckpt_dir, saving_steps=True)
+            if scheduler is not None:
+                scheduler.step()
             test_x, test_y = next(iter(test_loader))
             val_loss, val_acc = self.eval().step(test_x, test_y)
 
@@ -233,12 +288,17 @@ class FFNModel(PreTrainedModel):
             history.append(metrics)
             pbar.set_description(', '.join(f"{k}: {v:.3f}" for k, v in metrics.items()))
             
-            # Checkpoint saving
+            # Checkpoint saving for epochs
             if epoch_num+1 in checkpoint_epochs:
-                self.save_checkpoint(self, epoch_num+1)
+                self.save_checkpoint(self, metrics, epoch_num+1, num_steps,
+                                     filename=ckpt_dir)
 
         torch.set_grad_enabled(False)
-        return DataFrame.from_records(history, columns=['train/loss', 'train/acc', 'val/loss', 'val/acc'])
+        return ckpts, history
+        if return_ckpts:
+            return ckpts, history
+        else:
+            return DataFrame.from_records(history, columns=['train/loss', 'train/acc', 'val/loss', 'val/acc'])
 
 class Model(PreTrainedModel):
     def __init__(self, config) -> None:
@@ -276,6 +336,12 @@ class Model(PreTrainedModel):
         return torch.stack([rearrange(layer.weight.data, "(s o) h -> s o h", s=2) for layer in self.blocks])
     
     @property
+    def b_tensor(self, folded=True):
+        l, r = self.w_lr[0].unbind()
+        b = einsum(self.w_u, l, r, "cls out, out in1, out in2 -> cls in1 in2")
+        return 0.5 * (b + b.mT)
+    
+    @property
     def w_l(self):
         return self.w_lr.unbind(1)[0]
     
@@ -301,7 +367,7 @@ class Model(PreTrainedModel):
         
         return loss, accuracy
     
-    def fit(self, train, test, transform=None):
+    def fit(self, train, test, transform=None, early_milestone=1.0):
         torch.manual_seed(self.config.seed)
         torch.set_grad_enabled(True)
         
@@ -313,16 +379,26 @@ class Model(PreTrainedModel):
         
         pbar = tqdm(range(self.config.epochs))
         history = []
-        
+        #steps = 0
+        #milestone = 0.40
+        #early_stopped = False
         for _ in pbar:
+            #if early_stopped:
+            #    break
             epoch = []
             for x, y in loader:
+                #val_loss, val_acc = self.eval().step(test_x, test_y)
+                ##if val_acc > early_milestone:
+                #    #print(f'milestone {milestone} reached! step {steps}')
+                #    early_stopped = True
+                #    break
                 loss, acc = self.train().step(x, y)
                 epoch += [(loss.item(), acc.item())]
-                
+                #pbar.set_description(f'intermediate step {steps} ~ val_acc {val_acc:.3f}')
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                #steps += 1
             scheduler.step()
             
             val_loss, val_acc = self.eval().step(test_x, test_y)

@@ -16,13 +16,15 @@ def relu_ev(mu: Tensor, sigma: Tensor) -> Tensor:
     normal_dist = Normal(mu, sigma)
     return mu * normal_dist.cdf(mu) + sigma * normal_dist.log_prob(mu).exp()
 
-def relu_prime_ev(mu: Tensor, sigma: Tensor) -> Tensor:
+def relu_prime_ev(mu: Tensor, sigma: Tensor, debug=False) -> Tensor:
     """Expected value of RELU'(x) under N(mu, sigma)
     Got an error here at Normal(mu, sigma) # before .cdf. Error in mu, sigma
     """
-    print(type(mu), type(sigma))
-    print(mu.shape)
-    print(sigma.shape)
+    # this is the debug print!!! Shit man
+    if debug:
+        print(type(mu), type(sigma))
+        print(mu.shape)
+        print(sigma.shape)
     return Normal(mu, sigma).cdf(mu)
 
 def relu_poly_ev(n: int, mu: Tensor, sigma: Tensor) -> Tensor:
@@ -42,6 +44,7 @@ def relu_poly_ev(n: int, mu: Tensor, sigma: Tensor) -> Tensor:
 
     loc = -mu / sigma
     expected_value = torch.zeros_like(mu)
+    #print('inside relu_poly_ev, ev shape: ',expected_value.shape)
 
     # Precompute standard normal PDF and CDF at loc
     phi_loc = Normal(0, 1).log_prob(loc).exp()  # PDF of standard normal at loc

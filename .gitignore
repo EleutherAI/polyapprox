@@ -164,3 +164,7 @@ cython_debug/
 
 # Ignore experiments/data folder
 experiments/data/
+experiments/datadicts/
+experiments/old_code/
+experiments/checkpoints/
+data/
