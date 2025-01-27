@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polyapprox"
+description = "Closed-form polynomial approximations to neural networks"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["interpretability", "explainable-ai"]
+license = {text = "MIT License"}
+dependencies = [
+    "array-api-compat",
+    "numpy",
+    "scipy",
+]
+version = "0.1.0"
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "statsmodels",
+]
+
+[tool.pyright]
+include = ["polyapprox*"]
+reportPrivateImportUsage = false
+
+[tool.setuptools.packages.find]
+include = ["polyapprox*"]
+
+[tool.ruff]
+# Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes
+# See https://beta.ruff.rs/docs/rules/ for more possible rules
+select = ["E", "F", "I"]
+# Same as Black.
+line-length = 88
+# Avoid automatically removing unused imports in __init__.py files.
+# Such imports will be flagged with a dedicated message suggesting
+# that the import is either added to the module's __all__ symbol
+ignore-init-module-imports = true
