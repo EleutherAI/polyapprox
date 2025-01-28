@@ -19,6 +19,7 @@ from .gelu import gelu_ev, gelu_poly_ev, gelu_prime_ev
 from .integrate import (
     gauss_hermite,
     master_theorem,
+    quadratic_feature_mean_cov,
 )
 from .relu import relu_ev, relu_poly_ev, relu_prime_ev
 
@@ -53,7 +54,7 @@ class OlsResult(Generic[ArrayType]):
         d_input, d_out = self.beta.shape
         xp = array_api_compat.get_namespace(self.gamma)
 
-        rows, cols = map(xp.asarray, np.tril_indices(d_input))
+        rows, cols = map(xp.asarray, np.triu_indices(d_input))
         gamma = xp.zeros((d_out, d_input, d_input), dtype=self.gamma.dtype)
         gamma[:, rows, cols] = self.gamma
         return 0.5 * (gamma + xp.permute_dims(gamma, (0, 2, 1)))
@@ -163,24 +164,25 @@ def ols(
         mean = avg_mean
         output_mean = avg_output
 
-    # beta = Cov(x)^-1 Cov(x, f(x))
-    if cov is not None:
-        beta = xp.linalg.solve(cov, output_cross_cov)
-    else:
-        beta = output_cross_cov
+    if order == "linear":
+        gamma = None
 
-    alpha = output_mean
-    if mean is not None:
-        alpha -= mean @ beta
+        # beta = Cov(x)^-1 Cov(x, f(x))
+        if cov is not None:
+            beta = xp.linalg.solve(cov, output_cross_cov)
+        else:
+            beta = output_cross_cov
 
-    if order == "quadratic":
+        alpha = output_mean
+        if mean is not None:
+            alpha -= mean @ beta
+
+    elif order == "quadratic":
         # Get indices to all unique pairs of input dimensions
-        rows, cols = map(xp.asarray, np.tril_indices(d_input))
+        rows, cols = map(xp.asarray, np.triu_indices(d_input))
 
-        # TODO: Support non-zero means and non-diagonal covariances
-        assert cov is None and mean is None
-        sigma = xp.eye(d_input)
-        mu = xp.zeros(d_input)
+        sigma = xp.eye(d_input) if cov is None else cov
+        mu = xp.zeros(d_input) if mean is None else mean
 
         # "Expand" our covariance and cross-covariance matrices into a batch of 2x2
         # and 2x1 matrices, respectively, to apply the master theorem. Each matrix
@@ -225,26 +227,25 @@ def ols(
             + coefs[2] * const[:, None]
         )
 
-        # TODO: Make this actually work for nontrivial mean and cov
-        # Compute the mean and covariance matrix of the input features
-        # (products of potentially non-central jointly Gaussian variables)
-        # feature_mean = noncentral_isserlis(expanded_cov, expanded_mean)
+        # "phi" here is the quadratic feature expansion
+        # "psi" is the concatenation of the input and the quadratic features
+        psi_mean, psi_cov = quadratic_feature_mean_cov(mu, sigma)
+        phi_mean = psi_mean[d_input:]
 
-        # Where rows == cols, E[x * y] = E[x^2] = 1
-        # Where rows != cols, E[x * y] = E[x] * E[y] = 0
-        feature_mean = xp.astype(rows == cols, W2.dtype)
+        quad_xcov = W2 @ (E_gy_x1x2 - xp.outer(const, phi_mean))
+        psi_xcov = xp.concat(
+            [
+                output_cross_cov,
+                quad_xcov.T,
+            ]
+        )
+        coef = xp.linalg.solve(psi_cov, psi_xcov)
+        beta, gamma = coef[:d_input], coef[d_input:].T
 
-        # Where rows == cols, Var[x * y] = Var[x^2] = E[x^4] - E[x^2]^2 = 3 - 1 = 2
-        # Where rows != cols, Var[x * y] = E[x^2 * y^2] - E[x * y]^2 = 1 - 0 = 1
-        feature_var = 1 + (rows == cols)
-
-        quad_xcov = W2 @ (E_gy_x1x2 - xp.outer(const, feature_mean))
-        gamma = quad_xcov / feature_var
-
-        # adjust constant term
-        alpha -= feature_mean @ gamma.T
+        # Constant term ensures predictions are unbiased
+        alpha = output_mean - psi_mean @ coef
     else:
-        gamma = None
+        raise ValueError(f"Unknown order: {order}")
 
     return OlsResult(alpha, beta, gamma=gamma)
 

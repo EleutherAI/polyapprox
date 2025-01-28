@@ -13,32 +13,23 @@ def relu(x):
 
 
 def test_ols_relu():
-    d = 10
-    nil = np.zeros(d)
+    d_in, d_out = 10, 20
+    nil_in = np.zeros(d_in)
+    nil_out = np.zeros(d_out)
 
-    W1 = np.random.randn(d, d)
-    W2 = np.random.randn(d, d)
+    W1 = np.random.randn(d_in, d_in)
+    W2 = np.random.randn(d_out, d_in)
 
     # When x ~ N(0, 1) and there are no biases, the coefficients take the intuitive
     # form: 0.5 * W2 @ W1
-    lin_res = ols(W1, nil, W2, nil, act="relu", order="linear")
-    quad_res = ols(W1, nil, W2, nil, act="relu", order="quadratic")
+    lin_res = ols(W1, nil_in, W2, nil_out, act="relu", order="linear")
+    quad_res = ols(W1, nil_in, W2, nil_out, act="relu", order="quadratic")
     np.testing.assert_allclose(lin_res.beta.T, 0.5 * W2 @ W1)
     np.testing.assert_allclose(quad_res.beta.T, 0.5 * W2 @ W1)
 
-    # Monte Carlo check that the FVU is below 1
-    n = 10_000
-    x = np.random.randn(n, d)
-    y = relu(x @ W1.T) @ W2.T
-
-    # Quadratic FVU should be lower than linear FVU, which should be lower than 1
-    lin_fvu = np.square(y - lin_res(x)).sum() / np.square(y).sum()
-    quad_fvu = np.square(y - quad_res(x)).sum() / np.square(y).sum()
-    assert quad_fvu < lin_fvu < 1
-
     # Check the trivial case where the activation is the identity
-    lin_res = ols(W1, nil, W2, nil, act="identity", order="linear")
-    quad_res = ols(W1, nil, W2, nil, act="identity", order="quadratic")
+    lin_res = ols(W1, nil_in, W2, nil_out, act="identity", order="linear")
+    quad_res = ols(W1, nil_in, W2, nil_out, act="identity", order="quadratic")
     np.testing.assert_allclose(lin_res.beta.T, W2 @ W1)
     np.testing.assert_allclose(quad_res.beta.T, W2 @ W1)
 
@@ -46,6 +37,16 @@ def test_ols_relu():
     np.testing.assert_allclose(lin_res.alpha, 0)
     np.testing.assert_allclose(quad_res.alpha, 0)
     np.testing.assert_allclose(quad_res.gamma, 0)
+
+    # Monte Carlo check that the FVU is below 1
+    n = 10_000
+    x = np.random.randn(n, d_in)
+    y = relu(x @ W1.T) @ W2.T
+
+    # Quadratic FVU should be lower than linear FVU, which should be lower than 1
+    lin_fvu = np.square(y - lin_res(x)).sum() / np.square(y).sum()
+    quad_fvu = np.square(y - quad_res(x)).sum() / np.square(y).sum()
+    assert quad_fvu < lin_fvu < 1
 
 
 @pytest.mark.parametrize("act", ["gelu", "relu"])
