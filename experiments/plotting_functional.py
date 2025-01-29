@@ -10,9 +10,9 @@ from decomp.model import FFNModel
 torch.manual_seed(42)
 DIR = '/Users/alicerigg/Code/polyapprox/experiments/figs/'
 savepaths = {}
-use_imports = False
+use_imports = True
 if use_imports:
-    from experiments.functional_plotting_utils import (
+    from functional_plotting_utils import (
         ckpt_to_model, kl_divergence, compute_dataset_statistics,
         sample_dataset, sample_gaussian_n, evaluate_model,
         kl_div_between_models, fvu_between_models, orient_eigenvectors,
@@ -246,6 +246,9 @@ if False:
 
     print(kls,fvus)
 # %%
+# need to pass mean, cov data. 
+quad = model.approx_fit('linear', 'master')
+# %%
 print_dict_recursively(datadict['train_measures'])
 #datadict['train_measures'].keys()
 # %%
@@ -345,3 +348,9 @@ metrics = dataset['metrics']
 
 metrics[-1]
 # %%
+
+with torch.no_grad():
+    for model in models:
+        linear = model.approx_fit('linear')
+        kls.append(kl_div_between_models(model, quad, dataset))
+        fvus.append(fvu_between_models(model, quad, dataset))

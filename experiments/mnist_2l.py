@@ -3,7 +3,12 @@ from decomp.model import FFNModel
 from decomp.datasets import MNIST, CIFAR10
 from kornia.augmentation import RandomGaussianNoise
 from extra.ipynb_utils import test_model_acc
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from torch_polyapprox.ols import ols, ols_unstable
+from polyapprox.ols import ols as pols
+from polyapprox_old.ols import ols as ols_old
 import torch
 from torch import Tensor
 #from schedulefree import ScheduleFreeWrapper
@@ -65,15 +70,27 @@ class Minimal_FFN(nn.Module):
     def forward(self, x: Tensor):
         return self.dec(self.enc(x))
 
-    def approx_fit(self, order='linear', use_unstable=False):
-        W1 = self.W1.detach()
-        W2 = self.W2.detach()
-        b1 = self.b1.detach()
-        b2 = self.b2.detach()
-        if use_unstable:
-            return ols_unstable(W1,b1,W2,b2,order=order,act=self.act_fn)
+    def approx_fit(self, order='linear', version='master',
+                   mean=None, cov=None, debug_mode=False):
+        W1 = self.W1.detach().clone()
+        W2 = self.W2.detach().clone()
+        b1 = self.b1.detach().clone()
+        b2 = self.b2.detach().clone()
+        if version == 'stable':
+            return ols(W1,b1,W2,b2,act=self.act_fn,mean=mean,cov=cov,
+                       order=order,debug_mode=debug_mode)
+        elif version == 'unstable':
+            return ols_unstable(W1,b1,W2,b2,act=self.act_fn,mean=mean,cov=cov,
+                       order=order,debug_mode=debug_mode)
+        elif version == 'master':
+            return pols(W1,b1,W2,b2,act=self.act_fn,mean=mean,cov=cov,
+                       order=order) # does not support debug_mode
+        elif version == 'old':
+            return ols_old(W1,b1,W2,b2,act=self.act_fn,mean=mean,cov=cov,
+                       order=order)
         else:
-            return ols(W1,b1,W2,b2,order=order,act=self.act_fn)
+            raise ValueError(f'Version {version} not recognized! Supported: [stable, unstable, master]')
+            
 
 if __name__ == "__main__":
     device = 'cuda:4'

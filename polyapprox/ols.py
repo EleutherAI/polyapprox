@@ -165,7 +165,9 @@ def ols(
 
     # beta = Cov(x)^-1 Cov(x, f(x))
     if cov is not None:
-        beta = xp.linalg.solve(cov, output_cross_cov)
+        cov_tril = xp.tril(cov)
+        cov_tril += 1e-8 * xp.eye(W1.size(1))
+        beta = xp.linalg.solve(cov_tril, output_cross_cov)
     else:
         beta = output_cross_cov
 

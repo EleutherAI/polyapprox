@@ -55,13 +55,13 @@ class BaseDataset(Dataset):
         #self.x = (self.x - mean) / scale
         return mean, scale
 
-class MNIST(BaseDataset):
+class MNIST:
     """Wrapper class that loads MNIST onto the GPU for speed reasons."""
     def __init__(self, train=True, download=True, device="cpu"):
         dataset = datasets.MNIST(root='./data', train=train, download=download)
         self.x = dataset.data.float().to(device).unsqueeze(1) / 255.0
 
-        self.recenter()
+        #self.recenter()
         self.y = dataset.targets.to(device)
         self.name = 'mnist'
     def __getitem__(self, index):

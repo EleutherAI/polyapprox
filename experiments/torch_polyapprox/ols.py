@@ -568,7 +568,8 @@ def ols(
         debug_print(f'Equivalent to computing beta = Cov(x)^-1 Cov(x, f(x)). Only possible if Cov(x) invertible')
         debug_print(f'cov: {cov.shape}, output_cross_cov: {output_cross_cov.shape}')
         # need to fix: Cov is currently singular. cov is [784, 784]. Right. Need to take a tril.
-        beta = torch.linalg.solve(cov, output_cross_cov) # prev np
+        cov_tril = torch.tril(cov)
+        beta = torch.linalg.solve(cov_tril, output_cross_cov) # prev np
         debug_print(f'beta: {beta.shape}')
     else:
         debug_print(f'No cov provided, identity assumed. Then beta = output_cross_cov')

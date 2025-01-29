@@ -240,9 +240,10 @@ def plot_eig_attack_data(data, metric='acc', std=torch.linspace(0, 1, 20),
 
 
 # Full MNIST sweep
-_dir = 'default_centered'
-config = deepcopy(default)
+_dir = 'new_baseline_uncentered'
+config = deepcopy(baseline)
 config['noise'] = None
+#config['epochs'] = 2 ** 7
 #config['test'].recenter()
 #config['train'].recenter()
 config['wd'] = 0.1
@@ -262,8 +263,8 @@ multiplotter = MultiPlotter(processed_ckpts)
 measures = multiplotter.evaluate_quantitative_measures()
 
 savepath=None
-_dir = 'default_centered'
-long = ''
+#_dir = 'new_baseline_uncentered'
+long = 'long'
 if True:
     ckpt_save_path = f'/Users/alicerigg/Code/polyapprox/experiments/data/{_dir}{long}_datadict.pt'
     torch.save(datadict, ckpt_save_path)

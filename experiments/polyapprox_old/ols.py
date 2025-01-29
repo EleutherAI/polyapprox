@@ -131,6 +131,14 @@ def ols(
             print(*args)
     
     d_input = W1.shape[1]
+    W1 = W1.numpy()
+    W2 = W2.numpy()
+    b1 = b1.numpy()
+    b2 = b2.numpy()
+    if mean is not None:
+        mean = mean.numpy()
+    if  cov is not None:
+        cov = cov.numpy()
 
     # Preactivations are Gaussian; compute their mean and standard deviation
     debug_print(f'0. First handle linear case.')
@@ -149,7 +157,7 @@ def ols(
         debug_print(f'Computing preact_cov = W1 @ Id @ W1.T, shape f{preact_cov.shape}')
         debug_print(f'Computing cross_cov = Id @ W1.T, shape f{cross_cov.shape}')
 
-    preact_mean = b1.copy()
+    preact_mean = b1
     preact_var = np.diag(preact_cov)
     preact_std = np.sqrt(preact_var)
     debug_print(f'2. Preactivation mean (from b1): {preact_mean.shape}, variance: {preact_var.shape}, std: {preact_std.shape}')
@@ -185,7 +193,11 @@ def ols(
         debug_print(f'Cov provided. Computes beta = np.linalg.solve(cov, output_cross_cov) ~ linear algebra')
         debug_print(f'Equivalent to computing beta = Cov(x)^-1 Cov(x, f(x)). Only possible if Cov(x) invertible')
         debug_print(f'cov: {cov.shape}, output_cross_cov: {output_cross_cov.shape}')
-        beta = np.linalg.solve(cov, output_cross_cov)
+        # does it need cov tril?
+        cov_tril = np.tril(cov)
+        # update jan 28th:
+        cov_tril += 1e-8 + np.eye(W1.shape[1])
+        beta = np.linalg.solve(cov_tril, output_cross_cov)
         debug_print(f'beta: {beta.shape}')
     else:
         debug_print(f'No cov provided, identity assumed. Then beta = output_cross_cov')

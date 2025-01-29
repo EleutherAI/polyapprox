@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
 import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import torch
 from torch.distributions import MultivariateNormal
 from mnist_2l import Minimal_FFN
@@ -29,8 +31,31 @@ def kl_divergence(px, qx):
     return kl_divergence
 
 # ========== Dataset-Related Utility Functions ========== #
+def compute_dataset_statistics(dataset: torch.Tensor, clamp_min=1e-6):
+    '''
+    Returns mean [784], cov [784, 784], cholesky_factor [784, 784]
 
-def compute_dataset_statistics(dataset, clamp_min=1e-6):
+    Cholesky factor can be used to create a stable MultivariateNormal(mu,cov),
+    without worrying about numerical precision errors
+
+    '''
+    #print(x.shape)
+    #x = dataset.float().view(-1,784)
+    x = dataset.view(-1,784)
+    print(x.shape)
+    mean = torch.mean(x, dim=0, keepdim=True)
+    centered_data = x - mean
+    cov = torch.matmul(centered_data.T, centered_data) / (x.size(0) - 1)
+
+    eigvals, eigvecs = torch.linalg.eigh(cov)
+    clamped_eigvals = torch.clamp(eigvals, min=clamp_min)
+    sqrt_eigvals = torch.sqrt(clamped_eigvals)
+    # Handle potential numerical instability for covariance matrix
+    cholesky_factor = (eigvecs * sqrt_eigvals) @ eigvecs.T
+
+    return mean, cov, cholesky_factor
+
+def compute_dataset_statistics_old(dataset, clamp_min=1e-6):
     '''
     Returns mean [784], cov [784, 784], cholesky_factor [784, 784]
 
@@ -58,13 +83,52 @@ def sample_dataset(dataset, idx=None):
         idx = torch.randint(0, len(dataset.x), (1,)).item()
     return dataset.x[idx].reshape(1, -1)
 
-def sample_gaussian_n(mean, cholesky_factor, num_samples=1):
-    d = mean.size(0)
+def sample_gaussian_n(mean=None, cholesky_factor=None, num_samples=1):
+    '''
+    Must provide mean, to determine size.
+
+    If not provided, defaults to hardcoded torch.zeros(784)
+    '''
+    d = mean.size(0) if mean is not None else 784
+
+    if mean is None:
+        mean = torch.zeros(d)
+    #d = mean.size(0)
+
+    if cholesky_factor is None:
+        cholesky_factor = torch.eye(d)
     gaussian = MultivariateNormal(torch.zeros(d), torch.eye(d))
     z = gaussian.sample((num_samples,))
     x = mean + torch.mm(cholesky_factor, z.T).T
     return x
 
+def compute_means_covs(dataset):
+    '''
+    Takes [B,*] data, reshapes to [B,784]
+
+    returns mean, cov, Bmean, Bcov (gaussian, gaussian mixture)
+    '''
+    class_means = []
+    class_covariances = []
+
+    # Assuming dataset.y contains class labels and dataset.x contains the data
+    unique_classes = torch.unique(dataset.y)
+
+    for cls in unique_classes:
+        class_data = dataset.x[dataset.y == cls].view(-1,784)
+        mean = torch.mean(class_data, dim=0)
+        centered_data = class_data - mean
+        cov = torch.matmul(centered_data.T, centered_data) / (class_data.size(0) - 1)
+        
+        class_means.append(mean)
+        class_covariances.append(cov)
+
+    class_means = torch.stack(class_means)
+    class_covariances = torch.stack(class_covariances)
+    total_mean = torch.mean(dataset.x.view(-1,784), dim=0)
+    tcentered_data = dataset.x.view(-1, 784) - total_mean
+    total_cov = torch.matmul(tcentered_data.T, tcentered_data) / (tcentered_data.size(0) - 1)
+    return total_mean, total_cov, class_means, class_covariances
 # ========== Model Evaluation and Transformation ========== #
 
 def evaluate_model(model, dataset, loss_fn=None, inputs=None, proj=None, add=None, add_noise_std=None,
@@ -73,8 +137,14 @@ def evaluate_model(model, dataset, loss_fn=None, inputs=None, proj=None, add=Non
         acc_loss = lambda y_hat, y: (y_hat.argmax(dim=-1) == y).float().mean()
         loss_fn = acc_loss
     
-    labels = dataset.y[:num_examples] if inputs is None else None
-    inputs = dataset.x[:num_examples].flatten(start_dim=1) if inputs is None else inputs.flatten(start_dim=1)
+    if hasattr(dataset, 'y') and hasattr(dataset, 'x'):
+        labels = dataset.y[:num_examples] if inputs is None else None
+        inputs = dataset.x[:num_examples].flatten(start_dim=1) if inputs is None else inputs.flatten(start_dim=1)
+    else:
+        labels = None
+        inputs = dataset[:num_examples].flatten(start_dim=1)
+    
+    inputs = inputs.clone()
     inputs = transform(inputs) if transform is not None else inputs
     if proj is not None:
         inputs = torch.einsum('ij,bj->bi', proj, inputs)
@@ -84,7 +154,11 @@ def evaluate_model(model, dataset, loss_fn=None, inputs=None, proj=None, add=Non
         inputs += torch.randn_like(inputs) * add_noise_std
 
     fwd = model(inputs)
-    return (fwd, loss_fn(fwd, labels).item()) if return_logits else loss_fn(fwd, labels).item()
+    if labels is None:
+        loss = -1.0 # indicating invalid
+    else:
+        loss = loss_fn(fwd, labels).item()
+    return (fwd, loss) if return_logits else loss
 
 def kl_div_between_models(pmodel, qmodel, dataset, **kwargs):
     p_logits, _ = evaluate_model(pmodel, dataset, **kwargs)
