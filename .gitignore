@@ -167,4 +167,5 @@ experiments/data/
 experiments/datadicts/
 experiments/old_code/
 experiments/checkpoints/
+schedule_free
 data/
