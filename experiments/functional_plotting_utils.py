@@ -102,7 +102,8 @@ def sample_gaussian_n(mean=None, cholesky_factor=None, num_samples=1):
     x = mean + torch.mm(cholesky_factor, z.T).T
     return x
 
-def compute_means_covs(dataset):
+
+def compute_mean_cov_classmeans_classcovs(dataset, clamp_min=1e-6, cholesky=False):
     '''
     Takes [B,*] data, reshapes to [B,784]
 
@@ -128,6 +129,23 @@ def compute_means_covs(dataset):
     total_mean = torch.mean(dataset.x.view(-1,784), dim=0)
     tcentered_data = dataset.x.view(-1, 784) - total_mean
     total_cov = torch.matmul(tcentered_data.T, tcentered_data) / (tcentered_data.size(0) - 1)
+
+    if cholesky:
+        eigvals, eigvecs = torch.linalg.eigh(cov)
+        class_eigvals, class_eigvecs = torch.linalg.eigh(class_covariances)
+        clamped_eigvals = torch.clamp(eigvals, min=clamp_min)
+        clamped_class_eigvals = torch.clamp(class_eigvals, min=clamp_min)
+        sqrt_eigvals = torch.sqrt(clamped_eigvals)
+        sqrt_class_eigvals = torch.sqrt(clamped_class_eigvals)
+        # Handle potential numerical instability for covariance matrix
+        cholesky_factor = (eigvecs * sqrt_eigvals) @ eigvecs.T
+        class_left = torch.einsum('cij,ci->cij',class_eigvecs, sqrt_class_eigvals)
+        print(f'class_left {class_left.shape}, class_eigvecs {class_eigvecs.shape}')
+        print(f'vals {sqrt_class_eigvals.shape}')
+        class_cholesky_factors = torch.einsum('cij,ckj->cik', class_left, class_eigvecs)
+        return total_mean, total_cov, class_means, \
+            class_covariances, cholesky_factor, class_cholesky_factors
+    
     return total_mean, total_cov, class_means, class_covariances
 # ========== Model Evaluation and Transformation ========== #
 
@@ -166,12 +184,12 @@ def kl_div_between_models(pmodel, qmodel, dataset, **kwargs):
     kl_div = kl_divergence(p_logits, q_logits)
     return kl_div.mean().item()
 
-def fvu_between_models(pmodel, qmodel, dataset, **kwargs):
+def fvu_between_models(pmodel, qmodel, dataset, epsilon=1e-8, **kwargs):
     p_logits, _ = evaluate_model(pmodel, dataset, **kwargs)
     q_logits, _ = evaluate_model(qmodel, dataset, **kwargs)
     residual_variance = torch.var(p_logits - q_logits, unbiased=False)
     total_variance = torch.var(p_logits, unbiased=False)
-    return residual_variance / total_variance
+    return residual_variance / (total_variance+epsilon)
 
 def compute_top_eigenvectors(gamma_matrix, topk=3, orientation=None):
     eigvals, eigvecs = torch.linalg.eigh(gamma_matrix)
@@ -229,6 +247,23 @@ def plot_top_eigenvectors(eigvecs, eigvals, shape, topk=3, cmap='RdBu', vmax=0.2
 
 
 def startup(filepath, idx=-1):
+    '''
+    Returns:
+
+    datadict - all available  data
+    
+    ckpt[idx] - statedict to be used with Minimal_FFN. Pass ckpt and config to `ckpt_to_model`.
+
+    config - config file used to train the model. Redundant from datadict.
+
+    dataset - dataset from config file. Redundant from datadict. NOTE possible leakage: it is possible dataset
+    initialization from saving 'config' does not preserve transforms used on the model. Thus, it can only be
+    trusted for the uncentered case, currently.
+
+    model - `ckpt_to_model(ckpt, config)`. Redundant from datadict.
+
+    ols - `model.approx_fit('quadratic')`. 
+    '''
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"The specified file path does not exist: {filepath}")
     
@@ -237,10 +272,10 @@ def startup(filepath, idx=-1):
     ckpt = datadict['ckpts'][idx]
     config = datadict['config']
     dataset = config['test']
-    mu, scale = dataset.recenter()
+    #mu, scale = dataset.recenter()
     model = ckpt_to_model(ckpt, config)
     ols = model.approx_fit('quadratic')
-    return datadict, ckpt, config, dataset, mu, scale, model, ols
+    return datadict, ckpt, config, dataset, model, ols
 
 def print_dict_recursively(dictionary, indent=0):
     for key, val in dictionary.items():

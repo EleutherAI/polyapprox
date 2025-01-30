@@ -3,6 +3,7 @@ import torch
 from torchvision import datasets, transforms
 from decomp.datasets import MNIST as oldMNIST
 from decomp.model import FFNModel, _Config
+from mnist_2l import Minimal_FFN
 from functional_plotting_utils import compute_dataset_statistics
 def load_mnist(train=True, download=True, data_dir='./data'):
     """Load the MNIST dataset."""
@@ -45,7 +46,7 @@ train.x = train_data
 test.x = test_data
 print(mean.norm())
 # 
-config = _Config(out_bias=True, epochs=16)
+config = _Config(out_bias=True, epochs=2)
 #config['epochs'] = 16
 _model = FFNModel(config)
 #train = train.test_data.reshape(-1,784) / 255.0
@@ -56,33 +57,35 @@ _model.fit(train, test)
 from mnist_2l import Minimal_FFN
 from functional_plotting_utils import *
 model = Minimal_FFN(_model.get_layer_data())
+_cov = cov + 1e-6 * torch.eye(784)
+linear_01 = model.approx_fit(version='super')
+linear_ms = model.approx_fit(version='super',mean=mean, cov=_cov)
 
-linear_01 = model.approx_fit()
-linear_ms = model.approx_fit(mean=mean, cov=cov)
+if False:
+    print('starting n01')
+    quadratic_01 = model.approx_fit('quadratic','super')
+    print('starting ms')
+    quadratic_ms = model.approx_fit('quadratic','super',mean,_cov)
+    scores = []
+    # NOTE: Default `evaluate` on dataset type objects fetches directly from .x
+    # while i did set it above to be whitened, it could be that it is not whitened.
+    # supports passing whitened data directly
+    scores.append(evaluate_model(model, train, return_logits=False))
+    scores.append(evaluate_model(linear_01, train, return_logits=False))
+    scores.append(evaluate_model(linear_ms, train, return_logits=False))
 
-scores = []
-# NOTE: Default `evaluate` on dataset type objects fetches directly from .x
-# while i did set it above to be whitened, it could be that it is not whitened.
-# supports passing whitened data directly
-scores.append(evaluate_model(model, train, return_logits=False))
-scores.append(evaluate_model(linear_01, train, return_logits=False))
-scores.append(evaluate_model(linear_ms, train, return_logits=False))
-scores.append(evaluate_model(model, test, return_logits=False))
-scores.append(evaluate_model(linear_01, test, return_logits=False))
-scores.append(evaluate_model(linear_ms, test, return_logits=False))
-# 
-new_train = oldMNIST(train=True)
-new_test = oldMNIST(train=False)
+    scores.append(evaluate_model(quadratic_01, test, return_logits=False))
 
-scores.append(evaluate_model(model, new_train, return_logits=False))
-scores.append(evaluate_model(linear_01, new_train, return_logits=False))
-scores.append(evaluate_model(linear_ms, new_train, return_logits=False))
-scores.append(evaluate_model(model, new_test, return_logits=False))
-scores.append(evaluate_model(linear_01, new_test, return_logits=False))
-scores.append(evaluate_model(linear_ms, new_test, return_logits=False))
-scores
+    scores.append(evaluate_model(quadratic_ms, test, return_logits=False))
+
+    scores
 # %%
-test_data.
+from polyapprox.integrate import quadratic_feature_mean_cov
+
+vec = torch.randn(256)
+mat = torch.randn(256, 256)
+
+mean_psi, cov_psi = quadratic_feature_mean_cov(vec, mat, True)
 # %%
 _mean, _cov, _cholesky = compute_dataset_statistics(train_data, clamp_min=1e-5)
 _mean.norm(), _cov.norm()

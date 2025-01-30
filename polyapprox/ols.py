@@ -19,6 +19,7 @@ from .gelu import gelu_ev, gelu_poly_ev, gelu_prime_ev
 from .integrate import (
     gauss_hermite,
     master_theorem,
+    quadratic_feature_mean_cov,
 )
 from .relu import relu_ev, relu_poly_ev, relu_prime_ev
 
@@ -250,6 +251,172 @@ def ols(
 
     return OlsResult(alpha, beta, gamma=gamma)
 
+def qols(
+    W1: ArrayType,
+    b1: ArrayType,
+    W2: ArrayType,
+    b2: ArrayType,
+    *,
+    act: str = "gelu",
+    mean: ArrayType | None = None,
+    cov: ArrayType | None = None,
+    order: Literal["linear", "quadratic"] = "linear",
+) -> OlsResult[ArrayType]:
+    """Ordinary least squares approximation of a single hidden layer MLP.
+
+    Args:
+        W1: Weight matrix of the first layer.
+        b1: Bias vector of the first layer.
+        W2: Weight matrix of the second layer.
+        b2: Bias vector of the second layer.
+        mean: Mean of the input distribution. Can include a batch dimension, denoting
+            a Gaussian mixture with the specified means. If None, the mean is zero.
+        cov: Covariance of the input distribution. Can include a batch dimension,
+            denoting a Gaussian mixture with the specified covariance matrices. If
+            None, the covariance is the identity matrix.
+    """
+    d_input = W1.shape[1]
+    xp = array_api_compat.array_namespace(W1, b1, W2, b2)
+
+    # Preactivations are Gaussian; compute their mean and standard deviation
+    if cov is not None:
+        preact_cov = xp.linalg.matrix_transpose(cov @ W1.T) @ W1.T  # Supports batches
+        cross_cov = cov @ W1.T
+    else:
+        preact_cov = W1 @ W1.T
+        cross_cov = W1.T
+
+    preact_mean = b1
+    preact_var = xp.linalg.diagonal(preact_cov)
+    preact_std = xp.sqrt(preact_var)
+    if mean is not None:
+        preact_mean = preact_mean + mean @ W1.T
+
+    try:
+        act_ev = ACT_TO_EVS[act]
+        act_prime_ev = ACT_TO_PRIME_EVS[act]
+    except KeyError:
+        raise ValueError(f"Unknown activation function: {act}")
+
+    # Apply Stein's lemma to compute cross-covariance of the input
+    # with the activations. We need the expected derivative of the
+    # activation function with respect to the preactivation.
+    act_prime_mean = act_prime_ev(preact_mean, preact_std)
+    output_cross_cov = (cross_cov * act_prime_mean[..., None, :]) @ W2.T
+
+    # Compute expectation of act_fn(x) for each preactivation
+    act_mean = act_ev(preact_mean, preact_std)
+    output_mean = act_mean @ W2.T + b2
+
+    # Law of total covariance
+    if cov is not None and cov.ndim > 2:
+        cov = cov.mean(axis=0)  # type: ignore
+
+    # Average over mixture components if necessary
+    if mean is not None and mean.ndim > 1:
+        avg_mean = mean.mean(axis=0)  # type: ignore
+        avg_output = output_mean.mean(axis=0)
+
+        # Add the covariance of the means to the covariance matrix
+        extra_cov = mean.T @ mean / len(mean) - xp.outer(avg_mean, avg_mean)
+        cov = cov + extra_cov if cov is not None else extra_cov + xp.eye(d_input)
+
+        # Add the cross-covariance of the means to the cross-covariance matrix
+        extra_xcov = mean.T @ output_mean / len(mean) - xp.outer(avg_mean, avg_output)
+        output_cross_cov = output_cross_cov.mean(axis=0) + extra_xcov
+
+        mean = avg_mean
+        output_mean = avg_output
+
+    if order == "linear":
+        gamma = None
+
+        # beta = Cov(x)^-1 Cov(x, f(x))
+        if cov is not None:
+            beta = xp.linalg.solve(cov, output_cross_cov)
+        else:
+            beta = output_cross_cov
+
+        alpha = output_mean
+        if mean is not None:
+            alpha -= mean @ beta
+
+    elif order == "quadratic":
+        # Get indices to all unique pairs of input dimensions
+        rows, cols = map(xp.asarray, np.triu_indices(d_input))
+
+        sigma = xp.eye(d_input) if cov is None else cov
+        mu = xp.zeros(d_input) if mean is None else mean
+
+        # "Expand" our covariance and cross-covariance matrices into a batch of 2x2
+        # and 2x1 matrices, respectively, to apply the master theorem. Each matrix
+        # corresponds to a pairing of two input dimensions. We do a similar thing
+        # for the means, which are 1D vectors.
+        expanded_cov = xp.stack(
+            [
+                xp.stack([sigma[rows, rows], sigma[rows, cols]]),
+                xp.stack([sigma[cols, rows], sigma[cols, cols]]),
+            ]
+        ).T
+        expanded_xcov = xp.stack(
+            [
+                cross_cov[rows],
+                cross_cov[cols],
+            ]
+        ).T
+        expanded_mean = xp.stack([mu[rows], mu[cols]]).T
+
+        coefs = master_theorem(
+            # Add an extra singleton dimension so that we can broadcast across all the
+            # pairings of input dimensions
+            mu_x=preact_mean[..., None],
+            var_x=preact_var[..., None],
+            cov_y=expanded_cov,
+            xcov=expanded_xcov,
+            mu_y=expanded_mean,
+        )
+
+        # Compute univariate integrals
+        try:
+            poly_ev = ACT_TO_POLY_EVS[act]
+        except KeyError:
+            raise ValueError(f"Quadratic not implemented for activation: {act}")
+
+        quad = poly_ev(2, preact_mean, preact_std)
+        lin = poly_ev(1, preact_mean, preact_std)
+        const = poly_ev(0, preact_mean, preact_std)
+        E_gy_x1x2 = (
+            coefs[0] * quad[:, None]
+            + coefs[1] * lin[:, None]
+            + coefs[2] * const[:, None]
+        )
+
+        # "phi" here is the quadratic feature expansion
+        # "psi" is the concatenation of the input and the quadratic features
+        print('I survived up to here')
+        psi_mean, psi_cov = quadratic_feature_mean_cov(mu, sigma)
+        print('2')
+        phi_mean = psi_mean[d_input:]
+
+        quad_xcov = W2 @ (E_gy_x1x2 - xp.outer(const, phi_mean))
+        print('3')
+        psi_xcov = xp.concat(
+            [
+                output_cross_cov,
+                quad_xcov.T,
+            ]
+        )
+        print('4')
+        coef = xp.linalg.solve(psi_cov, psi_xcov)
+        print('5')
+        beta, gamma = coef[:d_input], coef[d_input:].T
+
+        # Constant term ensures predictions are unbiased
+        alpha = output_mean - psi_mean @ coef
+    else:
+        raise ValueError(f"Unknown order: {order}")
+
+    return OlsResult(alpha, beta, gamma=gamma)
 
 def glu_ols(
     W: ArrayType,

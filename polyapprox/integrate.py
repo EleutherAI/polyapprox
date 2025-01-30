@@ -185,3 +185,99 @@ def pair_partitions(elements: list):
 
         for rest in pair_partitions(remaining):
             yield [(pivot, partner)] + rest
+
+def quadratic_feature_mean_cov(
+    mu: ArrayType, Sigma: ArrayType, debug=False
+) -> tuple[ArrayType, ArrayType]:
+    """
+    Compute the mean and covariance of psi(X) = [X, phi(X)] in a fully vectorized way.
+    X ~ N(mu, Sigma) in R^d, and phi(X) is all pairwise products X_i X_j (i <= j).
+
+    Returns:
+      mean_psi (shape: d + d(d+1)//2)
+      cov_psi  (shape: (d + d(d+1)//2, d + d(d+1)//2))
+    """
+    def debug_print(*args):
+        if debug:
+            print(*args)
+
+    xp = array_api_compat.array_namespace(mu, Sigma)
+    d = mu.shape[0]
+    # Indices for upper-triangular pairs (i, j) with i <= j
+    I_triu, J_triu = map(xp.asarray, xp.triu_indices(d, d))
+    n_features = len(I_triu)  # = d(d+1)//2
+
+    
+    debug_print(d, I_triu.shape, n_features, 'step 0')
+
+    # ----------------------------------------------------------------
+    # 1) Mean of psi(X) = [ E[X],  E[phi(X)] ]
+    #    - E[X] = mu
+    #    - E[X_i X_j] = Sigma[i,j] + mu[i]*mu[j]
+    #      can be vectorized using the upper-tri part of (Sigma + mu mu^T).
+    # ----------------------------------------------------------------
+
+    # Vectorized approach to E[phi(X)]:
+    # We'll take the upper-triangular part of (Sigma + mu mu^T).
+    M = Sigma + xp.outer(mu, mu)  # (d, d)
+    mean_phi = M[I_triu, J_triu]  # (n_features,)
+
+    mean_psi = xp.concat([mu, mean_phi])  # (d + n_features,)
+    debug_print(M.shape, mean_phi.shape, mean_psi.shape, 'step 1')
+    # ----------------------------------------------------------------
+    # 2) Covariance blocks
+    #    Cov[psi(X)] = [[ Cov(X,X), Cov(X, phi(X))    ],
+    #                   [ Cov(phi(X), X), Cov(phi(X), phi(X)) ]]
+    # ----------------------------------------------------------------
+
+    # A) Cov(X, X) = Sigma
+    cov_xx = Sigma  # (d, d)
+
+    # B) Cov(phi(X), phi(X)) => can use the fully vectorized approach
+    #    from the previous discussion.  We'll call it cov_phi here.
+    SIR = Sigma[I_triu[:, None], I_triu[None, :]]  # shape (n_features, n_features)
+    SJS = Sigma[J_triu[:, None], J_triu[None, :]]
+    SIS = Sigma[I_triu[:, None], J_triu[None, :]]
+    SJR = Sigma[J_triu[:, None], I_triu[None, :]]
+
+    Mii = mu[I_triu]  # shape (n_features,)
+    Mjj = mu[J_triu]  # shape (n_features,)
+
+    cov_phi = (
+        SIR * SJS
+        + SIS * SJR
+        + xp.outer(Mii, Mii) * SJS
+        + xp.outer(Mii, Mjj) * SJR
+        + xp.outer(Mjj, Mii) * SIS
+        + xp.outer(Mjj, Mjj) * SIR
+    )  # shape (n_features, n_features)
+    numel = SIR.numel() + SJS.numel() + SIS.numel() + SJR.numel()
+    debug_print(cov_phi.shape, Mii.shape, SIR.shape, numel, 'step 2b')
+    # C) Cov(X, phi(X)) => B in block matrix
+    #    Cov(X_i, X_j X_k) = mu_j * Sigma[i,k] + mu_k * Sigma[i,j].
+    #
+    # Vectorized build: for each pair (j,k),
+    # we want column idx = mu_j * Sigma[:,k] + mu_k * Sigma[:,j].
+    # I_triu[idx] = j, J_triu[idx] = k
+    # so B[:, idx] = mu[j] * Sigma[:, k] + mu[k] * Sigma[:, j].
+
+    # sigma_jk = Sigma[:, J_triu] => shape (d, n_features)
+    # sigma_kj = Sigma[:, I_triu] => shape (d, n_features)
+    # multiply columns by mu[j], mu[k]
+    B = (
+        mu[I_triu][None, :] * Sigma[:, J_triu] + mu[J_triu][None, :] * Sigma[:, I_triu]
+    )  # shape (d, n_features)
+    debug_print(B.shape, B.numel(), 'step 2c')
+    # Now we assemble everything into a (d + n_features)-dim block matrix
+    cov_psi = xp.zeros((d + n_features, d + n_features))
+
+    # top-left block: Cov(X, X)
+    cov_psi[0:d, 0:d] = cov_xx
+    # top-right block: Cov(X, phi(X)) = B
+    cov_psi[0:d, d:] = B
+    # bottom-left block: Cov(phi(X), X) = B^T
+    cov_psi[d:, 0:d] = B.T
+    # bottom-right block: Cov(phi(X), phi(X))
+    cov_psi[d:, d:] = cov_phi
+    debug_print(mean_psi.shape, cov_psi.shape, mean_psi.numel(), cov_psi.numel(), 'step 3 final')
+    return mean_psi, cov_psi

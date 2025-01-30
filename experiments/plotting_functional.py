@@ -221,9 +221,9 @@ else:
         '''
         topk = pseudoinverse.size(-1) // 10
         return pseudoinverse[:,topk * digit]
-
-datadict_path = f'/Users/alicerigg/Code/polyapprox/experiments/datadicts/baseline_centeredlong_datadict.pt'
-datadict, ckpt, config, dataset, mu, scale, model, quad = startup(datadict_path, idx=-1)
+datadict_path = f'/Users/alicerigg/Code/polyapprox/experiments/data/new_baseline_uncenteredlong_datadict.pt'
+#datadict_path = f'/Users/alicerigg/Code/polyapprox/experiments/datadicts/baseline_centeredlong_datadict.pt'
+datadict, ckpt, config, dataset, model, quad = startup(datadict_path, idx=-1)
 
 if True:
     print_dict_recursively(datadict)
@@ -247,7 +247,7 @@ if False:
     print(kls,fvus)
 # %%
 # need to pass mean, cov data. 
-quad = model.approx_fit('linear', 'master')
+linear = model.approx_fit('linear', 'master')
 # %%
 print_dict_recursively(datadict['train_measures'])
 #datadict['train_measures'].keys()
@@ -258,7 +258,8 @@ metrics[0].keys()
 topk = 10
 digit = 3
 mag = torch.linspace(1e-3,1e2,16)
-gamma = quad.get_gamma_tensor()
+quad = model.approx_fit('quadratic', 'master')
+gamma = quad.unpack_gamma()
 pseudoinverse = get_eig_attack_pinv(gamma, topk=topk, orientation=1)
 
 add = eig_attack_add(pseudoinverse, digit)
@@ -285,7 +286,7 @@ plt.legend()
 plt.grid(True)
 
 # %% # DONE: create eigenvector attacks for every digit for topk between 1 and 10.
-gamma = quad.get_gamma_tensor()
+gamma = quad.unpack_gamma()
 vecs, pinv = get_eig_attack_pinv(gamma, 1, True, 1)
 fig, axes = plt.subplots(2, 5, figsize=(15, 6))
 
@@ -314,7 +315,7 @@ for k in range(1,11):
 ckpts = datadict['ckpts']
 config = datadict['config']
 dataset = config['test']
-mu, scale = dataset.recenter()
+#mu, scale = dataset.recenter()
 models = [ckpt_to_model(ckpt, config) for ckpt in ckpts]
 
 fvus = []
@@ -339,8 +340,6 @@ plt.legend()
 plt.grid(True)
 plt.show()
 
-# %%
-mu, scale
 # %%
 print(dataset.x.norm())
 # %%

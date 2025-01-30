@@ -8,6 +8,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from torch_polyapprox.ols import ols, ols_unstable
 from polyapprox.ols import ols as pols
+from polyapprox.ols import qols
 from polyapprox_old.ols import ols as ols_old
 import torch
 from torch import Tensor
@@ -87,6 +88,9 @@ class Minimal_FFN(nn.Module):
                        order=order) # does not support debug_mode
         elif version == 'old':
             return ols_old(W1,b1,W2,b2,act=self.act_fn,mean=mean,cov=cov,
+                       order=order)
+        elif version == 'super':
+            return qols(W1,b1,W2,b2,act=self.act_fn,mean=mean,cov=cov,
                        order=order)
         else:
             raise ValueError(f'Version {version} not recognized! Supported: [stable, unstable, master]')
