@@ -49,7 +49,7 @@ def isserlis(cov: ArrayType, indices: list[int]) -> ArrayType:
         indices: List of indices 0 < i < n for which to compute the expectation.
     """
     xp = array_api_compat.array_namespace(cov)
-    res = xp.zeros(cov.shape[:-2])
+    res = xp.zeros(cov.shape[:-2], device=cov.device)
 
     for partition in pair_partitions(indices):
         res += xp.prod(xp.stack([cov[..., a, b] for a, b in partition]), axis=0)
@@ -119,11 +119,11 @@ def master_theorem(
     # Iterate over polynomial terms
     for m in range(k + 1):
         # Running sum of terms in the coefficient
-        coef = xp.zeros(batch_shape)
+        coef = xp.zeros(batch_shape, device=mu_x.device)
 
         # Enumerate every combination of m unique a terms
         for comb in combinations(range(k), m):
-            prefix = xp.ones(batch_shape)
+            prefix = xp.ones(batch_shape, device=mu_x.device)
 
             # Multiply together the a terms
             for i in comb:

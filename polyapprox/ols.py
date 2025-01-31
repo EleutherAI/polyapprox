@@ -52,9 +52,14 @@ class OlsResult(Generic[ArrayType]):
 
         d_input, d_out = self.beta.shape
         xp = array_api_compat.get_namespace(self.gamma)
+        device = self.gamma.device
 
         rows, cols = map(xp.asarray, np.tril_indices(d_input))
-        gamma = xp.zeros((d_out, d_input, d_input), dtype=self.gamma.dtype)
+        rows, cols = xp.to_device(rows, device), xp.to_device(cols, device)
+    
+        gamma = xp.zeros(
+            (d_out, d_input, d_input), dtype=self.gamma.dtype, device=device
+        )
         gamma[:, rows, cols] = self.gamma
         return 0.5 * (gamma + xp.permute_dims(gamma, (0, 2, 1)))
 
@@ -176,11 +181,12 @@ def ols(
     if order == "quadratic":
         # Get indices to all unique pairs of input dimensions
         rows, cols = map(xp.asarray, np.tril_indices(d_input))
+        rows, cols = xp.to_device(rows, W1.device), xp.to_device(cols, W1.device)
 
         # TODO: Support non-zero means and non-diagonal covariances
         assert cov is None and mean is None
-        sigma = xp.eye(d_input)
-        mu = xp.zeros(d_input)
+        sigma = xp.eye(d_input, device=W1.device)
+        mu = xp.zeros(d_input, device=W1.device)
 
         # "Expand" our covariance and cross-covariance matrices into a batch of 2x2
         # and 2x1 matrices, respectively, to apply the master theorem. Each matrix
