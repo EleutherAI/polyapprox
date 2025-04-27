@@ -21,6 +21,7 @@ from .integrate import (
     master_theorem,
 )
 from .relu import relu_ev, relu_poly_ev, relu_prime_ev
+from .jump_relu import jump_relu_ev, jump_relu_poly_ev, jump_relu_prime_ev
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ ACT_TO_EVS = {
     "sigmoid": partial(gauss_hermite, sigmoid),
     "swish": partial(gauss_hermite, swish),
     "tanh": partial(gauss_hermite, np.tanh),
+    "jump_relu": jump_relu_ev,
 }
 # Mapping from activation functions to EVs of their derivatives
 ACT_TO_PRIME_EVS = {
@@ -76,6 +78,7 @@ ACT_TO_PRIME_EVS = {
     "sigmoid": partial(gauss_hermite, sigmoid_prime),
     "swish": partial(gauss_hermite, swish_prime),
     "tanh": partial(gauss_hermite, lambda x: 1 - np.tanh(x) ** 2),
+    "jump_relu": jump_relu_prime_ev,
 }
 ACT_TO_POLY_EVS = {
     "gelu": gelu_poly_ev,
@@ -83,6 +86,7 @@ ACT_TO_POLY_EVS = {
     "relu": relu_poly_ev,
     "sigmoid": sigmoid_poly_ev,
     "swish": swish_poly_ev,
+    "jump_relu": jump_relu_poly_ev,
 }
 
 

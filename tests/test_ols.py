@@ -7,10 +7,19 @@ from statsmodels.regression.linear_model import OLS
 from polyapprox.gelu import gelu
 from polyapprox.ols import ols
 
+ols_monte_carlo_tolerance = {
+    "relu": 0.0,
+    "gelu": 0.0,
+    "jump_relu": 0.05,
+}
 
 def relu(x):
     return np.maximum(0, x)
 
+def jump_relu(x):
+    # Define here so we can just use the simpler numpy option in tests
+    # and not worry about backend_compat_api
+    return np.where(x > 1.0, x, 0)
 
 def test_ols_relu():
     d = 10
@@ -48,14 +57,22 @@ def test_ols_relu():
     np.testing.assert_allclose(quad_res.gamma, 0)
 
 
-@pytest.mark.parametrize("act", ["gelu", "relu"])
+@pytest.mark.parametrize("act", ["gelu", "relu", "jump_relu"])
 @pytest.mark.parametrize("k", [1, 2, 3])
 def test_ols_monte_carlo(act: str, k: int):
     # Determinism
     np.random.seed(0)
 
     # Choose activation function
-    act_fn = gelu if act == "gelu" else relu
+    match act:
+        case "gelu":
+            act_fn = gelu
+        case "relu":
+            act_fn = relu
+        case "jump_relu":
+            act_fn = jump_relu
+        case _:
+            raise ValueError(f"Unknown activation function: {act}")
 
     # Implement the MLP
     def mlp(x, W1, b1, W2, b2):
@@ -93,5 +110,8 @@ def test_ols_monte_carlo(act: str, k: int):
     lo, hi = empirical.conf_int(0.01).T
     analytic_beta = analytic.beta.squeeze()
 
-    assert lo[0] < analytic.alpha < hi[0]
-    assert np.all((lo[1:] < analytic_beta) & (analytic_beta < hi[1:]))
+    # Add a variable tolerance for the Monte Carlo check
+    tol = ols_monte_carlo_tolerance[act]
+
+    assert lo[0] - tol < analytic.alpha < hi[0] + tol
+    assert np.all((lo[1:] - tol < analytic_beta) & (analytic_beta < hi[1:] + tol))
